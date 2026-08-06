@@ -42,10 +42,19 @@ services:
     environment:
       ANCRE_NATS_URL: nats://nats:4222
       CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_DB: ancre
+      CLICKHOUSE_USER: ancre
+      CLICKHOUSE_PASSWORD: ancre
     depends_on: [nats, clickhouse]
 
   clickhouse:
     image: clickhouse/clickhouse-server:24.8
+    # Without these the image mints a random password for `default` and every
+    # connection fails authentication — including the init scripts.
+    environment:
+      CLICKHOUSE_USER: ancre
+      CLICKHOUSE_PASSWORD: ancre
+      CLICKHOUSE_DB: ancre
     volumes:
       - clickhouse-data:/var/lib/clickhouse
       - ./init/clickhouse:/docker-entrypoint-initdb.d:ro

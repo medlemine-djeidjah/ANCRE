@@ -12,7 +12,13 @@
 -- Note: ClickHouse has ALTER DELETE. Append-only is enforced by the hash
 -- chain, not by the engine. That is the whole point of the chain.
 
-CREATE TABLE IF NOT EXISTS audit_events (
+-- Explicitly qualified. The image's entrypoint runs these scripts against
+-- `default` regardless of CLICKHOUSE_DB, so an unqualified CREATE puts the
+-- table in a database the ingester is not pointed at — and the failure is a
+-- "table does not exist" on the first insert, ten minutes into a quickstart.
+CREATE DATABASE IF NOT EXISTS ancre;
+
+CREATE TABLE IF NOT EXISTS ancre.audit_events (
   -- identity
   tenant_id         LowCardinality(String),
   system_id         LowCardinality(String),

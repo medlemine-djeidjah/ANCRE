@@ -7,5 +7,6 @@
 //! is no chain position for it to die in the middle of.
 
 pub mod chain_writer;
+pub mod clickhouse;
 pub mod pipeline;
 pub mod sink;

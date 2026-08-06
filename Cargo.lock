@@ -135,6 +135,7 @@ dependencies = [
  "async-nats",
  "clickhouse",
  "serde",
+ "smallvec",
  "thiserror 2.0.19",
  "time",
  "tokio",

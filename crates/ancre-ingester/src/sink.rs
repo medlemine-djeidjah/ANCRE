@@ -31,6 +31,29 @@ pub trait EventStore: Send + Sync {
     ) -> impl std::future::Future<Output = Result<Option<(u64, ancre_canon::Hash32)>, IngestError>> + Send;
 }
 
+/// A borrowed store is a store.
+///
+/// `Ingester` takes its store by value so a caller can hand it an owned
+/// client; this lets the same caller keep the client and lend it out — which
+/// is what any process that both ingests and reads back (the checkpointer, an
+/// evidence export) needs to do.
+impl<S: EventStore> EventStore for &S {
+    fn insert(
+        &self,
+        batch: &[AuditEvent],
+    ) -> impl std::future::Future<Output = Result<(), IngestError>> + Send {
+        (**self).insert(batch)
+    }
+
+    fn head(
+        &self,
+        chain: &ancre_chain::ChainId,
+    ) -> impl std::future::Future<Output = Result<Option<(u64, ancre_canon::Hash32)>, IngestError>> + Send
+    {
+        (**self).head(chain)
+    }
+}
+
 /// Retry policy for a store that is down.
 ///
 /// Backs off, and **never gives up by discarding**. The bus is the buffer: if

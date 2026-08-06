@@ -49,6 +49,25 @@ impl EventType {
             Self::ChainHeartbeat => "chain.heartbeat",
         }
     }
+
+    /// The inverse of `as_str`, for reading an event back out of the store.
+    ///
+    /// `None` rather than a default: a row carrying an event type this build
+    /// does not know about must not be silently reinterpreted as some other
+    /// type, because the type is hashed. Refusing is the only safe answer, and
+    /// it is what `canon_version` exists to make legible.
+    #[must_use]
+    pub fn from_wire(s: &str) -> Option<Self> {
+        Some(match s {
+            "llm.request" => Self::LlmRequest,
+            "provider.failover" => Self::ProviderFailover,
+            "config.generation.applied" => Self::ConfigGenerationApplied,
+            "pin.overridden" => Self::PinOverridden,
+            "telemetry.dropped" => Self::TelemetryDropped,
+            "chain.heartbeat" => Self::ChainHeartbeat,
+            _ => return None,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,6 +88,19 @@ impl Outcome {
             Self::Denied => "denied",
             Self::Interrupted => "interrupted",
         }
+    }
+
+    /// The inverse of `as_str`. See `EventType::from_wire` for why this
+    /// returns `None` rather than falling back to a default.
+    #[must_use]
+    pub fn from_wire(s: &str) -> Option<Self> {
+        Some(match s {
+            "ok" => Self::Ok,
+            "error" => Self::Error,
+            "denied" => Self::Denied,
+            "interrupted" => Self::Interrupted,
+            _ => return None,
+        })
     }
 }
 

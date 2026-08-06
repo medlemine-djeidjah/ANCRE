@@ -31,6 +31,42 @@ impl RiskClass {
         }
     }
 
+    /// The `Enum8` discriminant, which is what a ClickHouse row actually
+    /// carries — one byte, not a string. Pinned by the DDL and never
+    /// renumbered.
+    #[must_use]
+    pub const fn as_discriminant(self) -> i8 {
+        self as i8
+    }
+
+    /// The inverse of `as_discriminant`. `None` for a value outside the
+    /// pinned set, for the same reason `from_wire` refuses an unknown name.
+    #[must_use]
+    pub fn from_discriminant(d: i8) -> Option<Self> {
+        Some(match d {
+            0 => Self::Unclassified,
+            1 => Self::Minimal,
+            2 => Self::Transparency,
+            3 => Self::High,
+            _ => return None,
+        })
+    }
+
+    /// The inverse of `as_str`. `None` rather than a default: a row carrying
+    /// a class this build does not know about must not be read as
+    /// `Unclassified`, which would silently downgrade a high-risk system's
+    /// evidence to a lower one.
+    #[must_use]
+    pub fn from_wire(s: &str) -> Option<Self> {
+        Some(match s {
+            "unclassified" => Self::Unclassified,
+            "minimal" => Self::Minimal,
+            "transparency" => Self::Transparency,
+            "high" => Self::High,
+            _ => return None,
+        })
+    }
+
     /// Cold start and stale config both fail closed for High. Configurable,
     /// defaulted on, and any attempt to turn it off is itself a governance
     /// event (resolver spec §6).
@@ -81,6 +117,20 @@ impl RiskFlag {
             Self::SubstantialCandidate => "substantial_candidate",
         }
     }
+
+    /// The inverse of `as_str`. See `RiskClass::from_wire`.
+    #[must_use]
+    pub fn from_wire(s: &str) -> Option<Self> {
+        Some(match s {
+            "stale_config" => Self::StaleConfig,
+            "unpinned_model" => Self::UnpinnedModel,
+            "pin_overridden" => Self::PinOverridden,
+            "no_policy_engine" => Self::NoPolicyEngine,
+            "telemetry_dropped" => Self::TelemetryDropped,
+            "substantial_candidate" => Self::SubstantialCandidate,
+            _ => return None,
+        })
+    }
 }
 
 /// Output of the consecutive-generation diff (resolver spec §8).
@@ -126,6 +176,42 @@ mod tests {
             "substantial_candidate"
         );
         assert_eq!(ChangeClass::Substantial.as_str(), "substantial");
+    }
+
+    /// Every variant must survive `as_str` → `from_wire`. A variant added
+    /// without a matching parse arm reads back as `None`, which is how an
+    /// event would become unreadable from its own store.
+    #[test]
+    fn every_wire_form_round_trips() {
+        for c in [
+            RiskClass::Unclassified,
+            RiskClass::Minimal,
+            RiskClass::Transparency,
+            RiskClass::High,
+        ] {
+            assert_eq!(RiskClass::from_wire(c.as_str()), Some(c));
+        }
+        for f in [
+            RiskFlag::StaleConfig,
+            RiskFlag::UnpinnedModel,
+            RiskFlag::PinOverridden,
+            RiskFlag::NoPolicyEngine,
+            RiskFlag::TelemetryDropped,
+            RiskFlag::SubstantialCandidate,
+        ] {
+            assert_eq!(RiskFlag::from_wire(f.as_str()), Some(f));
+        }
+        for c in [
+            RiskClass::Unclassified,
+            RiskClass::Minimal,
+            RiskClass::Transparency,
+            RiskClass::High,
+        ] {
+            assert_eq!(RiskClass::from_discriminant(c.as_discriminant()), Some(c));
+        }
+        assert_eq!(RiskClass::from_discriminant(4), None);
+        assert_eq!(RiskClass::from_wire("not-a-class"), None);
+        assert_eq!(RiskFlag::from_wire("not-a-flag"), None);
     }
 
     #[test]
