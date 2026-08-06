@@ -13,11 +13,15 @@ ancre-types = { workspace = true }
 ed25519-dalek = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
-time = { workspace = true }
 hex = { workspace = true }
+
+[features]
+fixtures = ["ancre-types/fixtures"]
 
 [dev-dependencies]
 proptest = { workspace = true }
+smallvec = { workspace = true }
+ancre-chain = { path = ".", features = ["fixtures"] }
 
 [lints]
 workspace = true

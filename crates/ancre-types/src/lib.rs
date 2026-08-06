@@ -11,14 +11,18 @@
 
 pub mod config;
 pub mod event;
+#[cfg(feature = "fixtures")]
+pub mod fixtures;
 pub mod pins;
 pub mod risk;
+pub mod time;
 
 pub use ancre_canon::{CANON_VERSION, Hash32};
 pub use config::{
     ConfigSnapshot, IngressMeta, KeyBinding, Matcher, PromptRef, Route, RouteSpec, SnapshotError,
     SnapshotSpec, SystemConfig, SystemConfigSpec,
 };
-pub use event::{AuditEvent, EmittedEvent, EventType, Metrics, Outcome};
+pub use event::{AuditEvent, EmittedEvent, EventType, HashedBody, Metrics, Outcome};
 pub use pins::{Pins, RequestCtx, UNKNOWN, UNRESOLVED_PREFIX};
 pub use risk::{ChangeClass, RiskClass, RiskFlag};
+pub use time::Timestamp;

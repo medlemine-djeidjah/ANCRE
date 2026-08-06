@@ -35,7 +35,6 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "ciborium",
- "hex",
  "proptest",
  "serde",
  "sha2",
@@ -46,13 +45,14 @@ name = "ancre-chain"
 version = "0.1.0"
 dependencies = [
  "ancre-canon",
+ "ancre-chain",
  "ancre-types",
  "ed25519-dalek",
  "hex",
  "proptest",
  "serde",
+ "smallvec",
  "thiserror 2.0.19",
- "time",
 ]
 
 [[package]]
@@ -172,9 +172,9 @@ dependencies = [
  "ancre-canon",
  "ancre-chain",
  "ancre-types",
- "hex",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

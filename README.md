@@ -3,9 +3,11 @@
 An LLM gateway that produces regulator-grade evidence as a side effect of
 serving traffic.
 
-**Status: architectural scaffold.** The workspace compiles, `cargo fmt` and
-`cargo clippy` are clean, and every function body is a `todo!()` tagged with
-the milestone that fills it. Nothing runs yet.
+**Status: M1 (trust root) complete; M2–M5 scaffolded.**
+
+The deterministic encoder, the hash chain and the offline verifier are real
+and tested — 57 tests, both hash back-ends. Everything downstream of them is a
+`todo!()` tagged with the milestone that fills it.
 
 ## Documents
 
@@ -37,33 +39,74 @@ Three deployable binaries plus a verifier — PRD §10 caps production at three
 containers, and that ceiling is a customer-adoption constraint, not a
 preference.
 
-## Where to start
+## Try it
 
-M1, in order (mvp-plan §5):
+```sh
+cargo run -p ancre-verify --example gen-fixture > chain.jsonl
+cargo run -p ancre-verify -- --chain chain.jsonl
+```
 
-1. `crates/ancre-canon` — deterministic encoding. Write **resolver spec test
-   6 first**: two independently-built snapshots of the same logical config
-   produce byte-identical `config_hash`. Non-deterministic canonical encoding
-   is invisible until an auditor cannot verify a chain, and by then every chain
-   ever written is suspect.
-2. `crates/ancre-chain` — event hash and verification.
-3. `crates/ancre-verify` — verifies a JSONL fixture, exit 0/1.
+```
+Chain verified: 50 000 events, seq 1–50000, no violations.
+  range root: 709a200ee658750b4785d8c082c0593ff0e5de2804a2757df8958b5ea9d26b10
+  chain head: 9eb965f6b8c0a2e59fcb561286c26e2ecd62c6128fd3c648e07f51fd0df885bc
+```
 
-M1 is done when a deliberately corrupted event in a 100k-event fixture is
-caught by the verifier and the report names its `seq`.
+Tamper with one event and it says which one:
+
+```sh
+cargo run -p ancre-verify --example gen-fixture -- tamper > tampered.jsonl
+cargo run -p ancre-verify -- --chain tampered.jsonl; echo "exit=$?"
+```
+
+```
+VERIFICATION FAILED: 50 000 events, seq 1–50000, 1 violation.
+  - event 41207 was altered after it was sealed: it records hash 50e1d2… but
+    its contents hash to b56c60…
+exit=1
+```
+
+Exit codes are 0 clean, 1 violations, **2 cannot verify**. The third is not
+decoration: "this build does not implement the rule set these events were
+sealed under" is a different answer from "this chain is invalid", and merging
+them would be dishonest in the direction that costs the most credibility.
+
+## What M1 established
+
+- **Deterministic CBOR** (`ancre-canon`): RFC 8949 canonical ordering, no
+  floats, duplicate keys refused, and non-canonical input **rejected rather
+  than normalised** — otherwise an attacker picks which of two byte sequences
+  a verifier sees for the same event.
+- **RFC 6962 Merkle tree** for range roots — the Certificate Transparency
+  construction, so a subset can be proven without replaying the chain, and so
+  `[a,b,c]` and `[a,b,c,c]` cannot share a root.
+- **Length-prefixed chain rule**, so no value can be shifted across a field
+  boundary without changing the digest.
+- **Explicit wire forms**: every enum has a frozen `as_str()`, and timestamps
+  are integer microseconds. The canonical encoding depends on this repo's own
+  code plus ciborium and blake3 — never on how `time` or `uuid` happen to
+  serialize this year.
+
+## Next: M2, the resolver
+
+`crates/ancre-resolver`, per `version-pin-resolver-spec.md`. **Run the
+reload-storm bench on day one** — it is the one that catches an `RwLock` where
+`ArcSwap` belongs, and it is cheap before there is code worth defending.
+
+Gate: if `resolve` p99 cannot get under 5µs, stop and re-plan. The latency
+claim descends from that number.
 
 ## Build
 
 ```sh
-cargo check --workspace          # compiles; bodies are todo!()
-cargo clippy --workspace --all-targets
-cargo test --workspace           # no tests yet — that is M1's job
+cargo test --workspace --all-features
+cargo clippy --workspace --all-targets --all-features
 ```
 
-Both hash back-ends must keep building:
+Both hash back-ends must keep passing:
 
 ```sh
-cargo check -p ancre-canon --no-default-features --features hash-sha256
+cargo test -p ancre-canon --no-default-features --features hash-sha256
 ```
 
 ## Language

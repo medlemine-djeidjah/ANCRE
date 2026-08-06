@@ -21,7 +21,6 @@ serde = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
-hex = { workspace = true }
 
 [features]
 default = ["hash-blake3"]

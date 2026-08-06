@@ -15,5 +15,10 @@ uuid = { workspace = true }
 time = { workspace = true }
 thiserror = { workspace = true }
 
+[features]
+# Deterministic event fixtures for tests and benches. Never enabled by a
+# binary — nothing under `fixtures` may end up in a shipped gateway.
+fixtures = []
+
 [lints]
 workspace = true

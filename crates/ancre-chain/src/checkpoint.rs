@@ -25,9 +25,15 @@ impl std::fmt::Debug for SignatureBytes {
     }
 }
 
+// Same split as `Hash32`: bytes in CBOR, hex in JSON. A signature in an
+// evidence pack is something an auditor may need to copy.
 impl Serialize for SignatureBytes {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
-        s.serialize_bytes(&self.0)
+        if s.is_human_readable() {
+            s.serialize_str(&hex::encode(self.0))
+        } else {
+            s.serialize_bytes(&self.0)
+        }
     }
 }
 
@@ -44,13 +50,28 @@ impl<'de> Deserialize<'de> for SignatureBytes {
                     .map(SignatureBytes)
                     .map_err(|_| E::invalid_length(v.len(), &self))
             }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                let mut out = [0u8; 64];
+                hex::decode_to_slice(v, &mut out)
+                    .map_err(|_| E::invalid_value(serde::de::Unexpected::Str(v), &self))?;
+                Ok(SignatureBytes(out))
+            }
         }
-        d.deserialize_bytes(V)
+        if d.is_human_readable() {
+            d.deserialize_str(V)
+        } else {
+            d.deserialize_bytes(V)
+        }
     }
 }
 
 /// The signed body. Canonically encoded before signing, so the signature is
 /// over bytes a verifier can reproduce, not over a struct layout.
+///
+/// `built_at` is a `Timestamp` (integer microseconds) for the same reason the
+/// event timestamps are: this value is signed, and a `time` crate upgrade that
+/// changed its serde representation would invalidate every checkpoint ever
+/// issued.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckpointBody {
     pub tenant_id: String,
@@ -61,7 +82,7 @@ pub struct CheckpointBody {
     /// verifier check a subset without replaying the whole chain, which is
     /// what an auditor actually does (mvp-plan §4).
     pub root_hash: Hash32,
-    pub built_at: time::OffsetDateTime,
+    pub built_at: ancre_types::Timestamp,
     pub canon_version: String,
 }
 
