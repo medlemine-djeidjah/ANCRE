@@ -53,13 +53,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo run -p ancre-bench --release --example resolve-gate
       - run: cargo run -p ancre-bench --release --example overhead-gate
+      - run: cargo run -p ancre-bench --release --example chaos-gate
 
   # Criterion, for drift over time rather than absolute targets. Not gating:
   # criterion alone will not fail a build, and wiring up critcmp against a
   # stored baseline is M3 work.
   bench-drift:
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/master'
+    if: github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

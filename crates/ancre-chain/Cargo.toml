@@ -11,6 +11,7 @@ description = "Event hashing, chain verification, checkpoint signing."
 ancre-canon = { workspace = true }
 ancre-types = { workspace = true }
 ed25519-dalek = { workspace = true }
+rand = { workspace = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 hex = { workspace = true }
@@ -20,6 +21,7 @@ fixtures = ["ancre-types/fixtures"]
 
 [dev-dependencies]
 proptest = { workspace = true }
+serde_json = { workspace = true }
 smallvec = { workspace = true }
 ancre-chain = { path = ".", features = ["fixtures"] }
 

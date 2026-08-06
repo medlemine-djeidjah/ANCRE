@@ -13,7 +13,8 @@ use ancre_canon::{Hash32, Hasher};
 use ancre_types::AuditEvent;
 
 pub use checkpoint::{
-    Checkpoint, CheckpointBody, CheckpointSigner, SignatureBytes, VerifyingKeyBytes,
+    Checkpoint, CheckpointBody, CheckpointSigner, InclusionProof, SignatureBytes,
+    VerifyingKeyBytes, prove_inclusion, verify_checkpoint, verify_inclusion,
 };
 pub use verify::{ChainReport, Violation, verify_range};
 
@@ -76,7 +77,7 @@ pub fn seal(event: &mut AuditEvent) -> Result<Hash32, ChainError> {
     Ok(h)
 }
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ChainError {
     #[error("canonical encoding failed: {0}")]
     Canon(String),
@@ -86,6 +87,14 @@ pub enum ChainError {
     BadSignature,
     #[error("malformed key: {0}")]
     BadKey(String),
+    #[error("inclusion proof does not reconstruct the checkpoint root")]
+    BadInclusionProof,
+    #[error("seq {seq} is outside the checkpointed range {from}..={to}")]
+    SeqOutOfRange { seq: u64, from: u64, to: u64 },
+    #[error("the supplied leaves do not match the checkpoint's root")]
+    LeavesDoNotMatchCheckpoint,
+    #[error("cannot seal an empty range")]
+    EmptyRange,
 }
 
 #[cfg(test)]

@@ -28,6 +28,7 @@ ancre-chain = { path = "crates/ancre-chain" }
 ancre-resolver = { path = "crates/ancre-resolver" }
 ancre-provider = { path = "crates/ancre-provider" }
 ancre-gateway = { path = "crates/ancre-gateway" }
+ancre-ingester = { path = "crates/ancre-ingester" }
 
 # trust root — these two are the only deps ancre-canon is allowed
 ciborium = "0.2"

@@ -14,6 +14,7 @@ ancre-types = { workspace = true, features = ["fixtures"] }
 ancre-chain = { workspace = true, features = ["fixtures"] }
 ancre-resolver = { workspace = true, features = ["testing"] }
 ancre-gateway = { workspace = true }
+ancre-ingester = { workspace = true }
 ancre-provider = { workspace = true }
 hyper = { workspace = true }
 http-body-util = { workspace = true }

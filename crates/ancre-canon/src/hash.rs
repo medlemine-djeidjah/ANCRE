@@ -219,6 +219,93 @@ pub fn hash_node(left: Hash32, right: Hash32) -> Hash32 {
     h.finalize()
 }
 
+/// The audit path proving leaf `index` is in a tree of `leaves`.
+///
+/// RFC 6962 §2.1.1. The proof is the sibling hashes along the path from the
+/// leaf to the root — `log2(n)` hashes, so proving one event out of ten
+/// million costs 24 of them rather than the whole range.
+///
+/// This is what an auditor actually needs. "Here is the decision you asked
+/// about, and here is the proof it was in the signed range" is a different
+/// conversation from "here are ten million events, verify them yourself".
+///
+/// Returns `None` if `index` is out of range.
+#[must_use]
+pub fn tree_proof(leaves: &[Hash32], index: usize) -> Option<Vec<Hash32>> {
+    if index >= leaves.len() {
+        return None;
+    }
+    let mut proof = Vec::new();
+    build_proof(leaves, index, &mut proof);
+    Some(proof)
+}
+
+fn build_proof(leaves: &[Hash32], index: usize, proof: &mut Vec<Hash32>) {
+    if leaves.len() <= 1 {
+        return;
+    }
+    let k = largest_pow2_below(leaves.len());
+    let (left, right) = leaves.split_at(k);
+    if index < k {
+        build_proof(left, index, proof);
+        proof.push(tree_root(right));
+    } else {
+        build_proof(right, index - k, proof);
+        proof.push(tree_root(left));
+    }
+}
+
+/// Recompute the root from a leaf and its audit path.
+///
+/// The caller compares the result against a root they already trust — one
+/// that came out of a signed checkpoint. This function deliberately does not
+/// take the expected root: a verifier that is handed the answer is easy to
+/// write wrong.
+#[must_use]
+pub fn root_from_proof(
+    leaf: Hash32,
+    index: usize,
+    tree_size: usize,
+    proof: &[Hash32],
+) -> Option<Hash32> {
+    if index >= tree_size {
+        return None;
+    }
+    // Walk down from the root recording which side the leaf falls on…
+    let mut side_is_left = Vec::new();
+    let mut idx = index;
+    let mut size = tree_size;
+    while size > 1 {
+        let k = largest_pow2_below(size);
+        if idx < k {
+            side_is_left.push(true);
+            size = k;
+        } else {
+            side_is_left.push(false);
+            idx -= k;
+            size -= k;
+        }
+    }
+
+    // …then combine upward. `tree_proof` emits siblings leaf-first, so the
+    // descent has to be reversed to line up with it. A proof of the wrong
+    // length is refused rather than partially applied: a verifier that
+    // tolerates trailing junk has accepted a proof it did not fully check.
+    if side_is_left.len() != proof.len() {
+        return None;
+    }
+
+    let mut acc = hash_leaf(leaf);
+    for (is_left, sibling) in side_is_left.iter().rev().zip(proof) {
+        acc = if *is_left {
+            hash_node(acc, *sibling)
+        } else {
+            hash_node(*sibling, acc)
+        };
+    }
+    Some(acc)
+}
+
 /// Largest power of two strictly less than `n`. `n` must be >= 2.
 fn largest_pow2_below(n: usize) -> usize {
     debug_assert!(n >= 2);
@@ -287,6 +374,85 @@ mod tests {
     fn empty_range_has_a_defined_root() {
         assert_eq!(tree_root(&[]), hash_bytes(EMPTY_TAG));
         assert_ne!(tree_root(&[]), GENESIS);
+    }
+
+    #[test]
+    fn an_inclusion_proof_reconstructs_the_root() {
+        let leaves: Vec<_> = (0..37).map(leaf).collect();
+        let root = tree_root(&leaves);
+
+        for i in 0..leaves.len() {
+            let proof = tree_proof(&leaves, i).unwrap();
+            assert_eq!(
+                root_from_proof(leaves[i], i, leaves.len(), &proof),
+                Some(root),
+                "leaf {i} must prove into the root"
+            );
+        }
+    }
+
+    #[test]
+    fn an_inclusion_proof_is_logarithmic() {
+        // The whole point: proving one event out of a million costs 20 hashes,
+        // not a million.
+        let leaves: Vec<_> = (0..1024)
+            .map(|i| Hash32([u8::try_from(i % 251).unwrap(); 32]))
+            .collect();
+        assert_eq!(tree_proof(&leaves, 500).unwrap().len(), 10);
+    }
+
+    #[test]
+    fn a_proof_for_the_wrong_leaf_does_not_reconstruct_the_root() {
+        let leaves: Vec<_> = (0..16).map(leaf).collect();
+        let root = tree_root(&leaves);
+        let proof = tree_proof(&leaves, 5).unwrap();
+
+        // Same path, different leaf: an event that was never in the range.
+        assert_ne!(root_from_proof(leaf(200), 5, 16, &proof), Some(root));
+        // Right leaf, wrong claimed position.
+        assert_ne!(root_from_proof(leaves[5], 6, 16, &proof), Some(root));
+    }
+
+    #[test]
+    fn a_tampered_proof_step_is_rejected() {
+        let leaves: Vec<_> = (0..16).map(leaf).collect();
+        let root = tree_root(&leaves);
+        let mut proof = tree_proof(&leaves, 5).unwrap();
+        proof[1] = leaf(99);
+        assert_ne!(root_from_proof(leaves[5], 5, 16, &proof), Some(root));
+    }
+
+    #[test]
+    fn a_proof_of_the_wrong_length_is_refused_outright() {
+        let leaves: Vec<_> = (0..16).map(leaf).collect();
+        let proof = tree_proof(&leaves, 5).unwrap();
+
+        // Too short: runs out of steps.
+        assert_eq!(root_from_proof(leaves[5], 5, 16, &proof[..2]), None);
+
+        // Too long: extra hashes are not silently ignored, because a verifier
+        // that accepts trailing junk accepts a proof it did not fully check.
+        let mut long = proof.clone();
+        long.push(leaf(99));
+        assert_eq!(root_from_proof(leaves[5], 5, 16, &long), None);
+    }
+
+    #[test]
+    fn a_single_leaf_tree_needs_no_proof() {
+        let leaves = vec![leaf(1)];
+        let proof = tree_proof(&leaves, 0).unwrap();
+        assert!(proof.is_empty());
+        assert_eq!(
+            root_from_proof(leaf(1), 0, 1, &proof),
+            Some(tree_root(&leaves))
+        );
+    }
+
+    #[test]
+    fn an_out_of_range_index_has_no_proof() {
+        let leaves: Vec<_> = (0..4).map(leaf).collect();
+        assert!(tree_proof(&leaves, 4).is_none());
+        assert_eq!(root_from_proof(leaf(0), 4, 4, &[]), None);
     }
 
     #[test]

@@ -26,7 +26,10 @@ use serde::{Serialize, de::DeserializeOwned};
 pub mod hash;
 mod hex;
 
-pub use hash::{GENESIS, Hash32, Hasher, hash_bytes, hash_leaf, hash_node, tree_root};
+pub use hash::{
+    GENESIS, Hash32, Hasher, hash_bytes, hash_leaf, hash_node, root_from_proof, tree_proof,
+    tree_root,
+};
 
 /// Borrowed bytes that encode as a CBOR **byte string**.
 ///

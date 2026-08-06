@@ -165,7 +165,7 @@ where
     let mut last_seq: Option<u64> = None;
     // The one thing here that is not streaming. 32 bytes per event, so a
     // 10M-event range costs 320MB — fine for a pack, not fine forever.
-    // TODO(M4): fold leaves into the tree incrementally so the whole range
+    // TODO(D1): fold leaves into the tree incrementally so the whole range
     // never has to be resident.
     let mut leaves: Vec<Hash32> = Vec::new();
 

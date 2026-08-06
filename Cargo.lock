@@ -24,6 +24,7 @@ dependencies = [
  "ancre-canon",
  "ancre-chain",
  "ancre-gateway",
+ "ancre-ingester",
  "ancre-provider",
  "ancre-resolver",
  "ancre-types",
@@ -57,7 +58,9 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "proptest",
+ "rand 0.8.7",
  "serde",
+ "serde_json",
  "smallvec",
  "thiserror 2.0.19",
 ]

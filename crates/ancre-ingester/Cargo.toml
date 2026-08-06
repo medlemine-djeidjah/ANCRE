@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 description = "NATS to ClickHouse. Allocates seq, computes the chain."
 
+[lib]
+name = "ancre_ingester"
+path = "src/lib.rs"
+
 [[bin]]
 name = "ancre-ingester"
 path = "src/main.rs"
@@ -24,6 +28,11 @@ time = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+ancre-types = { workspace = true, features = ["fixtures"] }
+ancre-chain = { workspace = true, features = ["fixtures"] }
+ancre-canon = { workspace = true }
 
 [lints]
 workspace = true
