@@ -29,6 +29,7 @@ bytes = { workspace = true }
 rustls = { workspace = true }
 hyper-rustls = { workspace = true }
 arc-swap = { workspace = true }
+smallvec = { workspace = true }
 moka = { workspace = true }
 governor = { workspace = true }
 async-nats = { workspace = true }

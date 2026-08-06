@@ -29,6 +29,7 @@ ancre-resolver = { path = "crates/ancre-resolver" }
 ancre-provider = { path = "crates/ancre-provider" }
 ancre-gateway = { path = "crates/ancre-gateway" }
 ancre-ingester = { path = "crates/ancre-ingester" }
+ancre-control = { path = "crates/ancre-control" }
 
 # trust root — these two are the only deps ancre-canon is allowed
 ciborium = "0.2"
@@ -100,9 +101,6 @@ missing_panics_doc = "allow"
 # name a lot of proper nouns — ClickHouse, JetStream, OpenAI, ArcSwap. Wrapping
 # every one in backticks makes prose worse to read for no correctness gain.
 doc_markdown = "allow"
-# TODO: remove once the stub bodies land. Every `async fn` here is currently
-# `todo!()`, so none of them await anything yet.
-unused_async = "allow"
 # the hot path must not allocate or panic silently
 panic_in_result_fn = "warn"
 

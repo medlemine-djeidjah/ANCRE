@@ -7,9 +7,20 @@ license.workspace = true
 repository.workspace = true
 description = "Control plane. Registry, snapshot build, checkpoint signing."
 
+[lib]
+name = "ancre_control"
+path = "src/lib.rs"
+
 [[bin]]
 name = "ancre-control"
 path = "src/main.rs"
+
+[features]
+# In-memory Registry and key store, for this crate's tests, the gateway's
+# config-feed tests, and the config gate. Never enabled by the binary: a
+# control plane that can serve fixture data is one command-line flag away from
+# publishing fixture pins into a customer's evidence.
+testing = []
 
 [dependencies]
 ancre-canon = { workspace = true }
@@ -28,6 +39,15 @@ time = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+ancre-types = { workspace = true, features = ["fixtures"] }
+ancre-chain = { workspace = true, features = ["fixtures"] }
+ancre-resolver = { workspace = true, features = ["testing"] }
+ancre-control = { workspace = true, features = ["testing"] }
+http-body-util = { workspace = true }
+tower = { workspace = true, features = ["util"] }
 
 [lints]
 workspace = true

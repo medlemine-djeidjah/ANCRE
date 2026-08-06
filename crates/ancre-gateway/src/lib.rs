@@ -16,6 +16,7 @@
 //! it should not need a network to check.
 
 pub mod auth;
+pub mod config_feed;
 pub mod proxy;
 pub mod serve;
 pub mod tap;
@@ -27,6 +28,6 @@ pub mod upstream;
 pub const GATEWAY_VERSION: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     "+",
-    // TODO(M4): set via build.rs from `git rev-parse --short HEAD`.
+    // TODO(E4): set via build.rs from `git rev-parse --short HEAD`.
     "unknown"
 );

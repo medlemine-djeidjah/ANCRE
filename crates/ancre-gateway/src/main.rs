@@ -13,7 +13,7 @@ use ancre_gateway::upstream::{Endpoints, HttpsUpstream};
 use ancre_resolver::{PinResolver, StalenessPolicy};
 use ancre_types::EmittedEvent;
 
-/// Stands in for the NATS JetStream publisher until M4 wires the bus.
+/// Stands in for the NATS JetStream publisher until the bus is wired.
 ///
 /// Deliberately loud: a gateway that silently discards evidence looks exactly
 /// like one that is working. Every batch is counted and logged, so running
@@ -33,7 +33,7 @@ impl EventSink for LoggingSink {
         tracing::warn!(
             batch = batch.len(),
             total,
-            "audit events discarded: no bus configured (M4 wires NATS)"
+            "audit events discarded: no bus configured"
         );
         Ok(())
     }
@@ -55,9 +55,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let (fork, rx) = TelemetryFork::new(65_536);
     tokio::spawn(Batcher::new(rx, LoggingSink::default(), BatchConfig::default()).run());
 
-    // TODO(M4): subscribe to the control plane and reload on `generation`
-    // bumps, with the 10s poll as a backstop. Until then the resolver stays
-    // cold, which means every request is refused — correct, and loudly so.
+    // TODO(M5): construct a `SnapshotSource` — the NATS subscription plus the
+    // HTTP poll against `GET /v1/snapshot` — and hand it to
+    // `ConfigFeed::run`. Verification, installation, the diff and the
+    // `config.generation.applied` events are implemented and tested in
+    // `ancre_gateway::config_feed`; what is missing is the transport that
+    // feeds it. Until then the resolver stays cold, which means every request
+    // is refused — correct, and loudly so.
     let resolver = Arc::new(PinResolver::cold(
         StalenessPolicy::default(),
         64 * 1024 * 1024,
@@ -75,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     tracing::warn!(
         "no control plane configured: the resolver is cold, so every request \
-         will be refused with 503 until M4 wires snapshot delivery"
+         will be refused with 503 until snapshot delivery is wired"
     );
 
     ancre_gateway::serve::serve(addr, state, async {

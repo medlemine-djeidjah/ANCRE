@@ -54,6 +54,7 @@ jobs:
       - run: cargo run -p ancre-bench --release --example resolve-gate
       - run: cargo run -p ancre-bench --release --example overhead-gate
       - run: cargo run -p ancre-bench --release --example chaos-gate
+      - run: cargo run -p ancre-bench --release --example config-gate
 
   # Criterion, for drift over time rather than absolute targets. Not gating:
   # criterion alone will not fail a build, and wiring up critcmp against a

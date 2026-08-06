@@ -46,8 +46,9 @@ impl PromptCache {
     /// it, and let the caller fail the request rather than serve unpinnable
     /// traffic.
     ///
-    /// TODO(M4): the control-plane fetch that produces `body` lives in the
-    /// gateway; this stays the only place a body enters the cache.
+    /// TODO(D2): the control-plane fetch that produces `body` — `GET
+    /// /v1/prompts/{hash}` — is served but nothing calls it, so no body is
+    /// ever resident. This stays the only place one can enter the cache.
     pub fn insert_verified(&self, hash: Hash32, body: &str) -> Result<Arc<str>, PromptError> {
         let actual = ancre_canon::hash_bytes(body.as_bytes());
         if actual != hash {

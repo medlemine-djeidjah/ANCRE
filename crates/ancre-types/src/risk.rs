@@ -58,6 +58,14 @@ pub enum RiskFlag {
     /// Telemetry was dropped in this window — the chain is complete but the
     /// record is not. Counted, and the drop is itself an event.
     TelemetryDropped,
+    /// This configuration change **may** constitute a substantial
+    /// modification. Review required.
+    ///
+    /// Carried on `config.generation.applied` only. It flags; a human decides;
+    /// the decision is logged. No code may branch on this as though it were a
+    /// determination — under the Act, a substantial modification can reset a
+    /// grandfathering position, and that is a legal call (PRD §6.5).
+    SubstantialCandidate,
 }
 
 impl RiskFlag {
@@ -70,6 +78,7 @@ impl RiskFlag {
             Self::PinOverridden => "pin_overridden",
             Self::NoPolicyEngine => "no_policy_engine",
             Self::TelemetryDropped => "telemetry_dropped",
+            Self::SubstantialCandidate => "substantial_candidate",
         }
     }
 }
@@ -112,6 +121,10 @@ mod tests {
         assert_eq!(RiskClass::Unclassified.as_str(), "unclassified");
         assert_eq!(RiskFlag::StaleConfig.as_str(), "stale_config");
         assert_eq!(RiskFlag::UnpinnedModel.as_str(), "unpinned_model");
+        assert_eq!(
+            RiskFlag::SubstantialCandidate.as_str(),
+            "substantial_candidate"
+        );
         assert_eq!(ChangeClass::Substantial.as_str(), "substantial");
     }
 

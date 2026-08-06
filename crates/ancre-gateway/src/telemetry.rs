@@ -87,6 +87,21 @@ pub struct Receiver {
     drops: Arc<DropCounter>,
 }
 
+impl Receiver {
+    /// Everything queued right now, without waiting.
+    ///
+    /// For a caller that owns the receiver directly — tests, mostly. The
+    /// production drain is `Batcher::run`, which batches, publishes, and
+    /// counts what it could not.
+    pub fn drain_now(&mut self) -> Vec<EmittedEvent> {
+        let mut out = Vec::new();
+        while let Ok(event) = self.rx.try_recv() {
+            out.push(event);
+        }
+        out
+    }
+}
+
 /// Counted, then emitted as a `telemetry.dropped` event once the bus is back.
 #[derive(Debug, Default)]
 pub struct DropCounter {

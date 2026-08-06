@@ -65,6 +65,17 @@ impl ConfigSnapshot {
         self.systems.iter()
     }
 
+    /// Every key binding, in no particular order.
+    ///
+    /// The tenant a system belongs to is only knowable through its keys —
+    /// `SystemConfig` carries no tenant, because the hot path never needs one
+    /// (the binding is found first, by key hash). Anything that has to name a
+    /// *chain* rather than a system does need it, since a chain is
+    /// `(tenant_id, system_id)`.
+    pub fn bindings(&self) -> impl Iterator<Item = &Arc<KeyBinding>> {
+        self.keys.values()
+    }
+
     /// Build from the control plane's serialisable form and derive
     /// `content_hash`. The only constructor — a snapshot without a hash is not
     /// a snapshot.
@@ -234,6 +245,80 @@ pub struct RouteSpec {
     pub prompt_hash: Hash32,
 }
 
+/// What actually travels from the control plane to a gateway node.
+///
+/// The envelope carries the spec **and** its content hash, and the receiver
+/// recomputes the hash before installing anything. The bus is not part of the
+/// trust boundary: anyone who can reach it can replay a message, and a
+/// truncated or edited one must be refused rather than installed. Pins are
+/// evidence, and evidence assembled from an unverified message is not.
+///
+/// It lives here rather than in `ancre-control` because both ends need it, and
+/// the hot-path crate must not take a dependency on the control plane to read
+/// its own configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotEnvelope {
+    pub generation: u64,
+    /// Over the spec's *contents*, `generation` excluded — the same hash the
+    /// gateway will carry in every `config_hash` pin.
+    pub content_hash: Hash32,
+    pub spec: SnapshotSpec,
+}
+
+/// Subject the control plane publishes on, and gateways subscribe to.
+pub const SNAPSHOT_SUBJECT: &str = "ancre.config.snapshot";
+
+impl SnapshotEnvelope {
+    /// Wrap a spec whose content hash has already been computed.
+    #[must_use]
+    pub fn seal(spec: SnapshotSpec, content_hash: Hash32) -> Self {
+        Self {
+            generation: spec.generation,
+            content_hash,
+            spec,
+        }
+    }
+
+    /// Compute the hash and wrap. For callers that do not already hold one.
+    pub fn seal_now(spec: SnapshotSpec) -> Result<Self, SnapshotError> {
+        let content_hash = ancre_canon::content_hash(&spec.content_view())
+            .map_err(|e| SnapshotError::Canon(e.to_string()))?;
+        Ok(Self::seal(spec, content_hash))
+    }
+
+    /// Recompute and compare, before anything is installed.
+    ///
+    /// Checks the generation too. A gateway that installed a spec whose
+    /// `generation` field disagreed with the envelope would resolve pins
+    /// claiming one generation while the fleet's records say another, and the
+    /// disagreement would surface only in an audit.
+    pub fn verify(&self) -> Result<(), SnapshotError> {
+        if self.spec.generation != self.generation {
+            return Err(SnapshotError::EnvelopeMismatch(format!(
+                "envelope generation {} does not match the spec's {}",
+                self.generation, self.spec.generation
+            )));
+        }
+        let recomputed = ancre_canon::content_hash(&self.spec.content_view())
+            .map_err(|e| SnapshotError::Canon(e.to_string()))?;
+        if recomputed != self.content_hash {
+            return Err(SnapshotError::EnvelopeMismatch(format!(
+                "content hash mismatch: envelope says {}, contents hash to {recomputed}",
+                self.content_hash
+            )));
+        }
+        Ok(())
+    }
+
+    /// Verify, then build. The only way a snapshot from the wire should ever
+    /// become a `ConfigSnapshot` — the two steps are joined here so no caller
+    /// can perform the second without the first.
+    pub fn install(self) -> Result<ConfigSnapshot, SnapshotError> {
+        self.verify()?;
+        ConfigSnapshot::build(self.spec)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyBindingSpec {
     pub key_hash: Hash32,
@@ -381,6 +466,10 @@ pub enum SnapshotError {
     KeyBindsUnknownSystem(String),
     #[error("canonical encoding failed: {0}")]
     Canon(String),
+    /// The envelope does not describe its own contents. Refused before
+    /// anything is installed.
+    #[error("snapshot envelope rejected: {0}")]
+    EnvelopeMismatch(String),
 }
 
 #[cfg(test)]
@@ -600,5 +689,53 @@ mod tests {
             }
             .matches(&req)
         );
+    }
+
+    #[test]
+    fn a_sealed_envelope_verifies_and_installs() {
+        let env = SnapshotEnvelope::seal_now(spec()).unwrap();
+        assert!(env.verify().is_ok());
+        assert_eq!(env.install().unwrap().generation, 41);
+    }
+
+    /// The bus is not trusted. An edited message must be refused rather than
+    /// installed — the pins it would produce would be evidence of a
+    /// configuration nobody approved.
+    #[test]
+    fn an_edited_spec_is_refused_before_it_can_be_installed() {
+        let mut env = SnapshotEnvelope::seal_now(spec()).unwrap();
+        env.spec.systems[0].routes[0].model_id = "claude-opus-5".into();
+
+        assert!(matches!(
+            env.clone().install(),
+            Err(SnapshotError::EnvelopeMismatch(_))
+        ));
+        assert!(env.verify().is_err());
+    }
+
+    #[test]
+    fn a_swapped_content_hash_is_refused() {
+        let mut env = SnapshotEnvelope::seal_now(spec()).unwrap();
+        env.content_hash = ancre_canon::hash_bytes(b"not this");
+        assert!(env.verify().is_err());
+    }
+
+    /// A generation the spec does not agree with would make every pin carrying
+    /// it point at a configuration that never existed.
+    #[test]
+    fn a_generation_that_disagrees_with_the_spec_is_refused() {
+        let mut env = SnapshotEnvelope::seal_now(spec()).unwrap();
+        env.generation += 1;
+        assert!(env.verify().is_err());
+    }
+
+    /// The envelope crosses a process boundary, so the round trip is part of
+    /// the contract — a hash that only survives in memory is not a check.
+    #[test]
+    fn verification_survives_a_json_round_trip() {
+        let env = SnapshotEnvelope::seal_now(spec()).unwrap();
+        let back: SnapshotEnvelope =
+            serde_json::from_slice(&serde_json::to_vec(&env).unwrap()).unwrap();
+        assert!(back.verify().is_ok());
     }
 }

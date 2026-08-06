@@ -15,6 +15,11 @@ uuid = { workspace = true }
 time = { workspace = true }
 thiserror = { workspace = true }
 
+[dev-dependencies]
+# The snapshot envelope crosses a process boundary as JSON, so the round trip
+# is part of what the tests check.
+serde_json = { workspace = true }
+
 [features]
 # Deterministic event fixtures for tests and benches. Never enabled by a
 # binary — nothing under `fixtures` may end up in a shipped gateway.

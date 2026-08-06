@@ -1,18 +1,18 @@
-//! Ancre control plane.
-//!
-//! Registry CRUD, key management, snapshot build and publication, checkpoint
-//! signing. Off the request path entirely — the gateway serves through a total
-//! control-plane outage up to the staleness budget (PRD §8).
-
-// Scaffold-only; remove as M4 lands. See the note in ancre-gateway's main.rs.
-#![allow(dead_code, unreachable_pub)]
-
-mod api;
-mod checkpointer;
-mod snapshot;
+//! Control plane entry point.
 
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    todo!("M4: tracing init, sqlx pool, NATS, axum serve, checkpointer task")
+    // TODO(M5): the Postgres `Registry`, the ClickHouse `ChainSource` and the
+    // NATS `SnapshotBus`. Snapshot build and publication, generation
+    // allocation, checkpoint scheduling, key rotation and the read API are
+    // implemented and tested against in-memory implementations of those three
+    // traits — this is the transport wiring, and it lands with the packaging
+    // that makes it testable against real infrastructure.
+    eprintln!(
+        "ancre-control: no datastores wired yet. Snapshot build, publication, \
+         checkpointing and the API are implemented and tested — see \
+         `cargo test -p ancre-control`."
+    );
+    ExitCode::FAILURE
 }

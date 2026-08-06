@@ -20,7 +20,8 @@ pub mod time;
 pub use ancre_canon::{CANON_VERSION, Hash32};
 pub use config::{
     ConfigSnapshot, IngressMeta, KeyBinding, KeyBindingSpec, Matcher, PinOverrides, PromptRef,
-    Route, RouteSpec, SnapshotContent, SnapshotError, SnapshotSpec, SystemConfig, SystemConfigSpec,
+    Route, RouteSpec, SNAPSHOT_SUBJECT, SnapshotContent, SnapshotEnvelope, SnapshotError,
+    SnapshotSpec, SystemConfig, SystemConfigSpec,
 };
 pub use event::{AuditEvent, EmittedEvent, EventType, HashedBody, Metrics, Outcome};
 pub use pins::{Pins, RequestCtx, UNKNOWN, UNRESOLVED_PREFIX};
