@@ -16,6 +16,7 @@
 //! it should not need a network to check.
 
 pub mod auth;
+pub mod bus;
 pub mod config_feed;
 pub mod proxy;
 pub mod serve;

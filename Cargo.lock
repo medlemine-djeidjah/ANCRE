@@ -97,6 +97,7 @@ name = "ancre-gateway"
 version = "0.1.0"
 dependencies = [
  "ancre-canon",
+ "ancre-chain",
  "ancre-provider",
  "ancre-resolver",
  "ancre-types",
@@ -131,10 +132,13 @@ version = "0.1.0"
 dependencies = [
  "ancre-canon",
  "ancre-chain",
+ "ancre-gateway",
  "ancre-types",
  "async-nats",
  "clickhouse",
+ "futures-util",
  "serde",
+ "serde_json",
  "smallvec",
  "thiserror 2.0.19",
  "time",

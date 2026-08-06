@@ -46,6 +46,7 @@ opentelemetry_sdk = { workspace = true }
 [dev-dependencies]
 ancre-types = { workspace = true, features = ["fixtures"] }
 ancre-resolver = { workspace = true, features = ["testing"] }
+ancre-chain = { workspace = true, features = ["fixtures"] }
 futures-util = { workspace = true }
 
 [lints]

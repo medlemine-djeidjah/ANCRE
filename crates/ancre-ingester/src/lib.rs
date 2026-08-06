@@ -6,6 +6,7 @@
 //! means a gateway node dying mid-flight cannot leave a gap in a chain — there
 //! is no chain position for it to die in the middle of.
 
+pub mod bus;
 pub mod chain_writer;
 pub mod clickhouse;
 pub mod pipeline;
