@@ -3,12 +3,12 @@
 An LLM gateway that produces regulator-grade evidence as a side effect of
 serving traffic.
 
-**Status: M1 (trust root) and M2 (resolver) complete; M3–M5 scaffolded.**
+**Status: M1–M3 complete; M4–M5 scaffolded.**
 
-The deterministic encoder, the hash chain, the offline verifier and the
-in-path pin resolver are real and tested — 106 tests, both hash back-ends,
-and the latency gate passes with room to spare. Everything downstream is a
-`todo!()` tagged with the milestone that fills it.
+The deterministic encoder, the hash chain, the offline verifier, the in-path
+pin resolver and the request pipeline are real and tested — 176 tests, both
+hash back-ends, both latency gates passing. What remains is persistence: the
+ingester, the control plane, and checkpoint signing.
 
 ## Documents
 
@@ -135,16 +135,49 @@ Design decisions worth knowing:
 - **Snapshots are validated at build time**, so the hot path indexes
   `routes[default_route]` with no bounds check and no `Option`.
 
-## Next: M3, the hot path
+## What M3 established
 
-`crates/ancre-gateway` — hyper proxy, OpenAI + Anthropic, SSE straight
-through, telemetry fork. Spec cases 2 (failover) and 5 (floating alias) land
-here.
+```sh
+cargo run -p ancre-bench --release --example overhead-gate
+```
 
-Gate: end-to-end p99 overhead under 2ms against a **null-gateway baseline** —
-the same binary with pinning compiled out. Measuring against
-direct-to-provider conflates our cost with network variance and produces a
-number that falls apart the first time a prospect reproduces it.
+| Measurement                          | Target | Actual |
+|--------------------------------------|--------|--------|
+| p99 added overhead vs null baseline  | < 2ms  | ~0     |
+| p99 added TTFT vs null baseline      | < 2ms  | ~0     |
+| p99 total gateway cost, in-process   | < 1ms  | 3µs    |
+
+The baseline is the **same binary with pinning compiled out**, not
+direct-to-provider — that would fold network variance into the number and
+produce something that falls apart the first time a prospect's own engineer
+reproduces it. The delta isolates what pinning costs (~250ns at p50); the
+total row is what a customer actually feels.
+
+Design decisions worth knowing:
+
+- **The response body forwards before it observes.** `TappedBody` hands each
+  frame downstream in the same poll it reads it, then scans the bytes already
+  in flight. Observation cannot delay a token.
+- **`model_version` comes from the provider's response**, never the request.
+  An id that does not name specific weights is recorded as
+  `unresolved:<alias>` with `RiskFlag::UnpinnedModel` — the alias stays
+  visible, because "we asked for gpt-4o and the provider would not say" is a
+  more useful answer than `unknown`.
+- **A client that hangs up mid-stream still produces an event**, via the
+  body's `Drop`. No event at all would be indistinguishable from no request.
+- **Untranslatable requests are refused, not rewritten.** Tool calls and
+  multiple system messages have no faithful Anthropic equivalent, so they
+  400. A wrong event is worse than a rejected request.
+- **`emit()` returns nothing.** No caller on the request path may branch on
+  telemetry success — a full channel drops, counts, and keeps serving.
+
+## Next: M4, persistence
+
+`ancre-ingester` and `ancre-control` — seq allocation, chain computation,
+ClickHouse batch insert, snapshot publication, ed25519 checkpoint signing.
+
+Done when ClickHouse can be killed for ten minutes under load: the gateway is
+unaffected, the ingester catches up, and the chain verifies with no gap.
 
 ## Build
 

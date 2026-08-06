@@ -40,6 +40,38 @@ pub struct Pins {
 }
 
 impl Pins {
+    /// Every pin `unknown`, for the null-baseline build only.
+    ///
+    /// The overhead claim is a **delta** measured against an identical binary
+    /// with pinning compiled out. Measuring against direct-to-provider instead
+    /// would fold network variance into the number and produce something that
+    /// falls apart the first time a prospect reproduces it (mvp-plan §5, M3).
+    ///
+    /// These pins are honest about being nothing: `has_gap()` is true, so if
+    /// this ever reached production traffic the events would say so loudly
+    /// rather than looking like real evidence.
+    #[must_use]
+    pub fn null_baseline() -> Self {
+        let unknown: Arc<str> = Arc::from(UNKNOWN);
+        Self {
+            config_generation: 0,
+            config_hash: ancre_canon::GENESIS,
+            system_id: Arc::clone(&unknown),
+            system_version: Arc::clone(&unknown),
+            ifu_version: Arc::clone(&unknown),
+            model_id: Arc::clone(&unknown),
+            model_version: Arc::clone(&unknown),
+            prompt_id: Arc::clone(&unknown),
+            prompt_version: Arc::clone(&unknown),
+            policy_id: Arc::clone(&unknown),
+            policy_version: Arc::clone(&unknown),
+            gateway_version: unknown,
+            risk_class: RiskClass::Unclassified,
+            resolved_stale: false,
+            risk_flags: SmallVec::new(),
+        }
+    }
+
     /// True if any pin is `unknown` or an unresolved alias — i.e. this event
     /// cannot fully reconstruct the decision that produced it.
     ///

@@ -13,6 +13,11 @@ ancre-canon = { workspace = true }
 ancre-types = { workspace = true, features = ["fixtures"] }
 ancre-chain = { workspace = true, features = ["fixtures"] }
 ancre-resolver = { workspace = true, features = ["testing"] }
+ancre-gateway = { workspace = true }
+ancre-provider = { workspace = true }
+hyper = { workspace = true }
+http-body-util = { workspace = true }
+bytes = { workspace = true }
 tokio = { workspace = true }
 arc-swap = { workspace = true }
 smallvec = { workspace = true }

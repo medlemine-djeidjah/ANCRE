@@ -7,6 +7,10 @@ license.workspace = true
 repository.workspace = true
 description = "The request path. Auth, pin resolution, routing, telemetry fork."
 
+[lib]
+name = "ancre_gateway"
+path = "src/lib.rs"
+
 [[bin]]
 name = "ancre-gateway"
 path = "src/main.rs"
@@ -19,8 +23,11 @@ ancre-provider = { workspace = true }
 tokio = { workspace = true }
 hyper = { workspace = true }
 hyper-util = { workspace = true }
+http-body = { workspace = true }
 http-body-util = { workspace = true }
+bytes = { workspace = true }
 rustls = { workspace = true }
+hyper-rustls = { workspace = true }
 arc-swap = { workspace = true }
 moka = { workspace = true }
 governor = { workspace = true }
@@ -34,6 +41,11 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
+
+[dev-dependencies]
+ancre-types = { workspace = true, features = ["fixtures"] }
+ancre-resolver = { workspace = true, features = ["testing"] }
+futures-util = { workspace = true }
 
 [lints]
 workspace = true
