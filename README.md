@@ -18,6 +18,7 @@ ingester, the control plane, and checkpoint signing.
 | `mvp-plan.md` | Plan to 31 Oct 2026, milestones M1–M5, frozen event schema |
 | `version-pin-resolver-spec.md` | The resolver, in detail. The hard part |
 | `docs/mapping-table.md` | AI Act requirement → schema column. Stub; also the lead magnet |
+| `docs/deferred.md` | **Everything knowingly incomplete, and why.** Read before trusting anything here |
 
 ## Layout
 
