@@ -1,0 +1,30 @@
+# The latency claim is a product feature, so regressions fail the build.
+# These benches gate CI from week 3 (mvp-plan §0).
+[package]
+name = "ancre-bench"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+ancre-canon = { workspace = true }
+ancre-types = { workspace = true }
+ancre-chain = { workspace = true }
+ancre-resolver = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "resolve"
+harness = false
+
+[[bench]]
+name = "canon"
+harness = false
+
+[lints]
+workspace = true

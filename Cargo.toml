@@ -1,0 +1,112 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/ancre-canon",
+    "crates/ancre-types",
+    "crates/ancre-chain",
+    "crates/ancre-resolver",
+    "crates/ancre-provider",
+    "crates/ancre-gateway",
+    "crates/ancre-ingester",
+    "crates/ancre-control",
+    "crates/ancre-verify",
+    "bench",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/ancre/ancre"
+
+[workspace.dependencies]
+# internal
+ancre-canon = { path = "crates/ancre-canon" }
+ancre-types = { path = "crates/ancre-types" }
+ancre-chain = { path = "crates/ancre-chain" }
+ancre-resolver = { path = "crates/ancre-resolver" }
+ancre-provider = { path = "crates/ancre-provider" }
+
+# trust root — these two are the only deps ancre-canon is allowed
+ciborium = "0.2"
+ciborium-io = "0.2"
+blake3 = "1"
+sha2 = "0.10"
+
+# shared
+# `rc` is required for `Arc<str>`, which pins and events use throughout. Declared
+# explicitly rather than relying on some other crate in the graph to enable it —
+# feature unification made this compile by accident once already.
+# Note serde's own caveat: round-tripping does not preserve sharing, so each
+# decoded event owns its strings. That is correct here — the sharing exists to
+# make the hot path cheap, not to be part of the wire format.
+serde = { version = "1", features = ["derive", "rc"] }
+serde_json = "1"
+thiserror = "2"
+smallvec = { version = "1", features = ["const_generics", "union", "serde"] }
+hex = "0.4"
+uuid = { version = "1", features = ["v4", "serde"] }
+time = { version = "0.3", features = ["serde", "formatting", "parsing"] }
+
+# data plane
+tokio = { version = "1", features = ["full"] }
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["full"] }
+http-body-util = "0.1"
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace", "cors"] }
+rustls = "0.23"
+arc-swap = "1"
+moka = { version = "0.12", features = ["future"] }
+governor = "0.10"
+ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8"] }
+rand = "0.8"
+
+# infra
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "time", "macros"] }
+clickhouse = { version = "0.13", features = ["time", "uuid"] }
+async-nats = "0.38"
+
+# observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+opentelemetry = "0.27"
+opentelemetry_sdk = { version = "0.27", features = ["rt-tokio"] }
+
+# dev
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+unreachable_pub = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+# The docs in this workspace carry the reasoning, not just the API, and they
+# name a lot of proper nouns — ClickHouse, JetStream, OpenAI, ArcSwap. Wrapping
+# every one in backticks makes prose worse to read for no correctness gain.
+doc_markdown = "allow"
+# TODO: remove once the stub bodies land. Every `async fn` here is currently
+# `todo!()`, so none of them await anything yet.
+unused_async = "allow"
+# the hot path must not allocate or panic silently
+panic_in_result_fn = "warn"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = "symbols"
+
+# benches need unwinding
+[profile.bench]
+lto = "thin"
+codegen-units = 1

@@ -1,0 +1,19 @@
+[package]
+name = "ancre-types"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared domain types: pins, audit events, config snapshots."
+
+[dependencies]
+ancre-canon = { workspace = true }
+serde = { workspace = true }
+smallvec = { workspace = true }
+uuid = { workspace = true }
+time = { workspace = true }
+thiserror = { workspace = true }
+
+[lints]
+workspace = true

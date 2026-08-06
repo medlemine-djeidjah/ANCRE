@@ -1,0 +1,34 @@
+# Ships inside every evidence pack and runs on an auditor's laptop.
+#
+# HARD CONSTRAINT (mvp-plan §3): the only workspace-internal dependencies
+# permitted are ancre-canon and ancre-chain — plus ancre-types, which they both
+# already pull in transitively, so the plan's wording is stricter than it can
+# actually be. Note the real rule: no HTTP client, no database driver, no
+# network capability of any kind. An auditor must be able to `cargo install`
+# this in one step and satisfy themselves, by reading this file, that it cannot
+# phone home.
+#
+# Adding a dependency here is a change to the trust story, not a build tweak.
+[package]
+name = "ancre-verify"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Standalone offline chain verifier."
+
+[[bin]]
+name = "ancre-verify"
+path = "src/main.rs"
+
+[dependencies]
+ancre-canon = { workspace = true }
+ancre-chain = { workspace = true }
+ancre-types = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+
+[lints]
+workspace = true

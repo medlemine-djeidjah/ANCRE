@@ -1,0 +1,73 @@
+# M5 target: `docker compose up` → a working, seeded gateway.
+#
+# Done when a stranger clones the repo and gets a verified chain without asking
+# a question. Three Ancre containers and four dependencies is already at the
+# edge of what a mid-market platform team will accept — do not add a fifth
+# Ancre service (PRD §10).
+
+name: ancre
+
+services:
+  gateway:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile.gateway
+    ports: ["8080:8080"]
+    environment:
+      ANCRE_CONTROL_URL: http://control:8081
+      ANCRE_NATS_URL: nats://nats:4222
+      # Fail closed on stale config for high-risk systems. Configurable,
+      # defaulted on, and turning it off is logged as a governance event.
+      ANCRE_FAIL_CLOSED_ON_STALE: "true"
+      ANCRE_STALENESS_BUDGET_SECS: "30"
+    depends_on: [control, nats]
+
+  control:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile.control
+    ports: ["8081:8081"]
+    environment:
+      DATABASE_URL: postgres://ancre:ancre@postgres:5432/ancre
+      ANCRE_NATS_URL: nats://nats:4222
+      # MVP key custody: a local file under age/SOPS. Enterprise moves this to
+      # Vault — the first security questionnaire will ask (mvp-plan §8.3).
+      ANCRE_SIGNING_KEY_PATH: /run/secrets/checkpoint-key.pem
+    depends_on: [postgres, nats]
+
+  ingester:
+    build:
+      context: ../..
+      dockerfile: deploy/compose/Dockerfile.ingester
+    environment:
+      ANCRE_NATS_URL: nats://nats:4222
+      CLICKHOUSE_URL: http://clickhouse:8123
+    depends_on: [nats, clickhouse]
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./init/clickhouse:/docker-entrypoint-initdb.d:ro
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ancre
+      POSTGRES_PASSWORD: ancre
+      POSTGRES_DB: ancre
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+  nats:
+    image: nats:2.10-alpine
+    command: ["-js", "-sd", "/data"]
+    volumes:
+      - nats-data:/data
+
+volumes:
+  clickhouse-data:
+  postgres-data:
+  nats-data:

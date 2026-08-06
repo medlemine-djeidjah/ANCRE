@@ -1,0 +1,24 @@
+[package]
+name = "ancre-provider"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Provider wire adapters: OpenAI, Anthropic. SSE passthrough."
+
+[dependencies]
+ancre-canon = { workspace = true }
+ancre-types = { workspace = true }
+hyper = { workspace = true }
+hyper-util = { workspace = true }
+http-body-util = { workspace = true }
+rustls = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,38 @@
+# Gating in CI from commit 1 (mvp-plan §5, M1).
+#
+# You are selling to security-conscious buyers who will ask about supply chain,
+# and LiteLLM had a PyPI compromise in March 2026. Having this from the first
+# commit is a cheap answer to a question that will be asked.
+
+[advisories]
+yanked = "deny"
+ignore = []
+
+[licenses]
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+deny = [
+    # No OpenSSL anywhere. rustls + aws-lc-rs throughout — the static-binary
+    # distribution story depends on it (PRD §10).
+    { name = "openssl" },
+    { name = "openssl-sys" },
+    { name = "native-tls" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

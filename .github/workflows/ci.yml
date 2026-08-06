@@ -1,0 +1,53 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets --all-features
+      - run: cargo test --workspace
+
+  # Both hash feature flags must build and pass. The SHA-256 path is not
+  # optional decoration — it is what an enterprise crypto policy will demand,
+  # and it must not rot (mvp-plan §8.2).
+  hash-features:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p ancre-canon --no-default-features --features hash-sha256
+      - run: cargo test -p ancre-chain --no-default-features --features ancre-canon/hash-sha256
+
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+
+  # The latency claim is a product feature, so a regression fails the build.
+  # Enable from week 3, once the M2 targets exist to compare against.
+  bench:
+    runs-on: ubuntu-latest
+    if: false # TODO(M2): flip on once resolve benches are real
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo bench -p ancre-bench -- --save-baseline pr
+      # TODO(M2): compare against the main baseline and fail on regression.
+      # criterion alone won't fail the build — needs critcmp or a threshold check.

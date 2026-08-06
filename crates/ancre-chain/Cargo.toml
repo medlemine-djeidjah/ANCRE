@@ -1,0 +1,23 @@
+[package]
+name = "ancre-chain"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Event hashing, chain verification, checkpoint signing."
+
+[dependencies]
+ancre-canon = { workspace = true }
+ancre-types = { workspace = true }
+ed25519-dalek = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+time = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+[lints]
+workspace = true

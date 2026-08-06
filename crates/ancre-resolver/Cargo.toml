@@ -1,0 +1,20 @@
+[package]
+name = "ancre-resolver"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "In-path version-pin resolver. Lock-free snapshot swap."
+
+[dependencies]
+ancre-canon = { workspace = true }
+ancre-types = { workspace = true }
+arc-swap = { workspace = true }
+smallvec = { workspace = true }
+moka = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[lints]
+workspace = true

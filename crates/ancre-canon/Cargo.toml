@@ -1,0 +1,34 @@
+# THE TRUST ROOT.
+#
+# Every other crate's correctness reduces to this one. It must stay small, its
+# dependency list must stay at exactly the three entries below, and once it
+# reaches 1.0 it must stop moving. Adding a dependency here is a design review,
+# not a commit.
+[package]
+name = "ancre-canon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Deterministic CBOR encoding and content hashing. The Ancre trust root."
+
+[dependencies]
+ciborium = { workspace = true }
+blake3 = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+hex = { workspace = true }
+
+[features]
+default = ["hash-blake3"]
+# Some customers' crypto policies mandate SHA-256. Compile-time, never runtime:
+# the hash choice is part of `canon_version` and must not vary per request.
+hash-blake3 = ["dep:blake3"]
+hash-sha256 = ["dep:sha2"]
+
+[lints]
+workspace = true

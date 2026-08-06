@@ -1,0 +1,33 @@
+[package]
+name = "ancre-control"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Control plane. Registry, snapshot build, checkpoint signing."
+
+[[bin]]
+name = "ancre-control"
+path = "src/main.rs"
+
+[dependencies]
+ancre-canon = { workspace = true }
+ancre-types = { workspace = true }
+ancre-chain = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+tower = { workspace = true }
+tower-http = { workspace = true }
+sqlx = { workspace = true }
+async-nats = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+uuid = { workspace = true }
+time = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[lints]
+workspace = true
