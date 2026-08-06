@@ -25,7 +25,9 @@ dependencies = [
  "ancre-chain",
  "ancre-resolver",
  "ancre-types",
+ "arc-swap",
  "criterion",
+ "smallvec",
  "tokio",
 ]
 
@@ -145,6 +147,7 @@ name = "ancre-resolver"
 version = "0.1.0"
 dependencies = [
  "ancre-canon",
+ "ancre-resolver",
  "ancre-types",
  "arc-swap",
  "moka",

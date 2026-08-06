@@ -10,10 +10,12 @@ publish = false
 
 [dependencies]
 ancre-canon = { workspace = true }
-ancre-types = { workspace = true }
-ancre-chain = { workspace = true }
-ancre-resolver = { workspace = true }
+ancre-types = { workspace = true, features = ["fixtures"] }
+ancre-chain = { workspace = true, features = ["fixtures"] }
+ancre-resolver = { workspace = true, features = ["testing"] }
 tokio = { workspace = true }
+arc-swap = { workspace = true }
+smallvec = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

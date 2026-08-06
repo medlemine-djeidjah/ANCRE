@@ -59,7 +59,7 @@ tower = "0.5"
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 rustls = "0.23"
 arc-swap = "1"
-moka = { version = "0.12", features = ["future"] }
+moka = { version = "0.12", features = ["future", "sync"] }
 governor = "0.10"
 ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8"] }
 rand = "0.8"

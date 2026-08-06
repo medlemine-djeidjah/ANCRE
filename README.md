@@ -3,10 +3,11 @@
 An LLM gateway that produces regulator-grade evidence as a side effect of
 serving traffic.
 
-**Status: M1 (trust root) complete; M2–M5 scaffolded.**
+**Status: M1 (trust root) and M2 (resolver) complete; M3–M5 scaffolded.**
 
-The deterministic encoder, the hash chain and the offline verifier are real
-and tested — 57 tests, both hash back-ends. Everything downstream of them is a
+The deterministic encoder, the hash chain, the offline verifier and the
+in-path pin resolver are real and tested — 106 tests, both hash back-ends,
+and the latency gate passes with room to spare. Everything downstream is a
 `todo!()` tagged with the milestone that fills it.
 
 ## Documents
@@ -87,14 +88,63 @@ them would be dishonest in the direction that costs the most credibility.
   code plus ciborium and blake3 — never on how `time` or `uuid` happen to
   serialize this year.
 
-## Next: M2, the resolver
+## What M2 established
 
-`crates/ancre-resolver`, per `version-pin-resolver-spec.md`. **Run the
-reload-storm bench on day one** — it is the one that catches an `RwLock` where
-`ArcSwap` belongs, and it is cheap before there is code worth defending.
+The gate the whole thesis descends from (resolver spec §9):
 
-Gate: if `resolve` p99 cannot get under 5µs, stop and re-plan. The latency
-claim descends from that number.
+```sh
+cargo run -p ancre-bench --release --example resolve-gate
+```
+
+| Measurement                              | Target  | Actual |
+|------------------------------------------|---------|--------|
+| `resolve` p50, quiescent                 | < 2µs   | 138ns  |
+| `resolve` p99, quiescent                 | < 5µs   | 152ns  |
+| `resolve` p99, 10/s reload storm         | < 8µs   | 158ns  |
+| **`resolve` p99, all cores + storm**     | < 8µs   | **2µs** |
+| `resolve` p99, 10k systems / 50k routes  | < 5µs   | 194ns  |
+| snapshot build, 10k systems / 50k routes | < 500ms | 110ms  |
+
+*(20-core dev machine, 500k samples per case. Quote the saturated row — the
+single-reader numbers are the uncontended floor and they flatter the design.)*
+
+A bench that has never failed is not evidence, so there is a control:
+
+```sh
+cargo run -p ancre-bench --release --example swap-control
+```
+
+It runs the same load through `ArcSwap` and through `RwLock<Arc<T>>`. At full
+core count the lock is **2.1× worse at the p99** — so the storm bench really
+does have the power to catch the mistake it exists to catch. At 8 readers on a
+20-core box the two are within 1.2× of each other, which is exactly why an
+under-subscribed bench is a trap.
+
+Design decisions worth knowing:
+
+- **Staleness is measured on the local monotonic clock**, not against the
+  control plane's `built_at`. Cross-machine skew must never feed a fail-closed
+  decision, and "time since this node refreshed" is the honest reading of the
+  bounded-staleness claim anyway.
+- **`generation` is excluded from `config_hash`**, making it a true content
+  identifier — so "generation bumped, nothing changed" is visible, which is
+  the question substantial-modification review actually asks.
+- **Cold start is an installed snapshot that refuses**, not an
+  `Option<Snapshot>` — no hot-path branch, and no invitation for a future
+  `unwrap_or_default()` to serve traffic with empty pins.
+- **Snapshots are validated at build time**, so the hot path indexes
+  `routes[default_route]` with no bounds check and no `Option`.
+
+## Next: M3, the hot path
+
+`crates/ancre-gateway` — hyper proxy, OpenAI + Anthropic, SSE straight
+through, telemetry fork. Spec cases 2 (failover) and 5 (floating alias) land
+here.
+
+Gate: end-to-end p99 overhead under 2ms against a **null-gateway baseline** —
+the same binary with pinning compiled out. Measuring against
+direct-to-provider conflates our cost with network variance and produces a
+number that falls apart the first time a prospect reproduces it.
 
 ## Build
 

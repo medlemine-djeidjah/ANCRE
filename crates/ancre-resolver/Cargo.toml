@@ -16,5 +16,12 @@ moka = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
+[features]
+# Deterministic snapshot fixtures for tests and benches.
+testing = []
+
+[dev-dependencies]
+ancre-resolver = { path = ".", features = ["testing"] }
+
 [lints]
 workspace = true

@@ -40,14 +40,27 @@ jobs:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
 
-  # The latency claim is a product feature, so a regression fails the build.
-  # Enable from week 3, once the M2 targets exist to compare against.
-  bench:
+  # The latency claim is a product feature, so missing it fails the build.
+  #
+  # This checks the absolute targets in resolver spec §9 against raw
+  # percentiles. A shared CI runner is noisier than a real gateway node, so a
+  # failure here means "go measure on real hardware", not "ship it anyway".
+  latency-gate:
     runs-on: ubuntu-latest
-    if: false # TODO(M2): flip on once resolve benches are real
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: cargo bench -p ancre-bench -- --save-baseline pr
-      # TODO(M2): compare against the main baseline and fail on regression.
-      # criterion alone won't fail the build — needs critcmp or a threshold check.
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo run -p ancre-bench --release --example resolve-gate
+
+  # Criterion, for drift over time rather than absolute targets. Not gating:
+  # criterion alone will not fail a build, and wiring up critcmp against a
+  # stored baseline is M3 work.
+  bench-drift:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/master'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo bench -p ancre-bench -- --save-baseline main

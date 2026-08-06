@@ -42,9 +42,28 @@ pub struct Pins {
 impl Pins {
     /// True if any pin is `unknown` or an unresolved alias — i.e. this event
     /// cannot fully reconstruct the decision that produced it.
+    ///
+    /// This is the countable gap. `unknown` shows up in a `GROUP BY` and turns
+    /// into a line item on an invoice; NULL would just hide (PRD §6.3).
+    ///
+    /// Note what is *not* a gap: `none`. A `policy_version` of `none` states
+    /// that no policy engine is configured, which is a fact about the system,
+    /// not a missing measurement.
     #[must_use]
     pub fn has_gap(&self) -> bool {
-        todo!("M2: scan the pin fields for UNKNOWN / UNRESOLVED_PREFIX")
+        [
+            &self.system_version,
+            &self.ifu_version,
+            &self.model_id,
+            &self.model_version,
+            &self.prompt_id,
+            &self.prompt_version,
+            &self.policy_id,
+            &self.policy_version,
+            &self.gateway_version,
+        ]
+        .iter()
+        .any(|v| &***v == UNKNOWN || v.starts_with(UNRESOLVED_PREFIX))
     }
 }
 
