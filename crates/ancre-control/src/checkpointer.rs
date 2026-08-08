@@ -62,6 +62,34 @@ pub trait ChainSource: Send + Sync {
     ) -> impl std::future::Future<Output = Result<Vec<Hash32>, ControlError>> + Send;
 }
 
+/// Shared, so one client can serve the checkpointer and the export endpoint at
+/// once. The same move the ingester makes with `EventStore for &S`: a process
+/// keeps its connection and lends it out, rather than opening a second one to
+/// the same database for the same reason.
+impl<T: ChainSource> ChainSource for std::sync::Arc<T> {
+    fn chains(
+        &self,
+    ) -> impl std::future::Future<Output = Result<Vec<ChainId>, ControlError>> + Send {
+        (**self).chains()
+    }
+
+    fn head_seq(
+        &self,
+        chain: &ChainId,
+    ) -> impl std::future::Future<Output = Result<Option<u64>, ControlError>> + Send {
+        (**self).head_seq(chain)
+    }
+
+    fn leaves(
+        &self,
+        chain: &ChainId,
+        seq_from: u64,
+        seq_to: u64,
+    ) -> impl std::future::Future<Output = Result<Vec<Hash32>, ControlError>> + Send {
+        (**self).leaves(chain, seq_from, seq_to)
+    }
+}
+
 /// Where signed checkpoints live. Postgres in production.
 ///
 /// ```sql
@@ -281,25 +309,55 @@ pub mod testing {
     use super::{
         ChainId, ChainSource, Checkpoint, CheckpointStore, ControlError, Hash32, Timestamp,
     };
+    use crate::export::ChainExport;
+    use ancre_types::AuditEvent;
 
+    /// Whole events rather than bare hashes, so the same fake serves the
+    /// checkpointer (which wants leaves) and the export (which wants events),
+    /// and the two cannot disagree about what is in a chain.
     #[derive(Debug, Default)]
     pub struct MemoryChain {
-        /// chain → leaf hashes, seq 1..=len.
-        chains: Mutex<HashMap<ChainId, Vec<Hash32>>>,
+        /// chain → events, seq 1..=len.
+        chains: Mutex<HashMap<ChainId, Vec<AuditEvent>>>,
     }
 
     impl MemoryChain {
-        /// Append `n` events to a chain. The hashes only have to be distinct
-        /// and reproducible — the tree does not care what they mean.
+        /// Append `n` properly chained events. Sealed, so what comes back out
+        /// verifies — a fake that produced events failing `verify_range` would
+        /// make the export tests pass for the wrong reason.
         pub fn append(&self, chain: &ChainId, n: u64) {
             let mut chains = self.chains.lock().unwrap();
-            let leaves = chains.entry(chain.clone()).or_default();
-            let base = leaves.len() as u64;
+            let events = chains.entry(chain.clone()).or_default();
+            let mut prev = events
+                .last()
+                .map_or(ancre_canon::GENESIS, |e: &AuditEvent| e.event_hash);
+            let base = events.len() as u64;
+
             for i in 0..n {
-                leaves.push(ancre_canon::hash_bytes(
-                    format!("{chain}/{}", base + i + 1).as_bytes(),
-                ));
+                let seq = base + i + 1;
+                let mut event = ancre_types::fixtures::event(seq, prev);
+                event.emitted.tenant_id = chain.tenant_id.as_str().into();
+                event.emitted.system_id = chain.system_id.as_str().into();
+                event.emitted.pins.system_id = chain.system_id.as_str().into();
+                ancre_chain::seal(&mut event).expect("a fixture event always seals");
+                prev = event.event_hash;
+                events.push(event);
             }
+        }
+    }
+
+    impl ChainExport for MemoryChain {
+        async fn events(
+            &self,
+            chain: &ChainId,
+            seq_from: u64,
+            seq_to: u64,
+        ) -> Result<Vec<AuditEvent>, ControlError> {
+            let chains = self.chains.lock().unwrap();
+            let all = chains.get(chain).map_or(&[][..], Vec::as_slice);
+            let from = usize::try_from(seq_from.saturating_sub(1)).unwrap_or(usize::MAX);
+            let to = usize::try_from(seq_to).unwrap_or(usize::MAX).min(all.len());
+            Ok(all.get(from..to).unwrap_or_default().to_vec())
         }
     }
 
@@ -331,7 +389,12 @@ pub mod testing {
                 .ok_or_else(|| ControlError::Db(format!("no such chain: {chain}")))?;
             let from = usize::try_from(seq_from.saturating_sub(1)).unwrap_or(usize::MAX);
             let to = usize::try_from(seq_to).unwrap_or(usize::MAX).min(all.len());
-            Ok(all.get(from..to).unwrap_or_default().to_vec())
+            Ok(all
+                .get(from..to)
+                .unwrap_or_default()
+                .iter()
+                .map(|e| e.event_hash)
+                .collect())
         }
     }
 

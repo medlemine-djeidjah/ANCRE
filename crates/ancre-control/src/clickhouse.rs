@@ -9,10 +9,13 @@
 
 use ancre_canon::Hash32;
 use ancre_chain::ChainId;
+use ancre_ingester::clickhouse::AuditEventRow;
+use ancre_types::AuditEvent;
 use clickhouse::Row;
 use serde::Deserialize;
 
 use crate::checkpointer::ChainSource;
+use crate::export::ChainExport;
 use crate::registry::ControlError;
 
 #[derive(Debug, Row, Deserialize)]
@@ -153,5 +156,50 @@ impl ChainSource for ClickHouseChains {
             .into_iter()
             .map(|r| Hash32::from_bytes(r.event_hash))
             .collect())
+    }
+}
+
+impl ChainExport for ClickHouseChains {
+    /// Whole events, in `seq` order, for the auditor's copy of the chain.
+    ///
+    /// The row mapping is **the ingester's**, imported rather than rewritten.
+    /// It is hash-critical — a conversion that changes one hashed byte
+    /// produces an export that fails to verify while the stored chain is
+    /// perfectly fine — and `round_trips_without_changing_the_event_hash` over
+    /// there is the test that owns it. A second copy of that mapping here
+    /// would be a second thing to keep correct, and the failure would look
+    /// like a broken chain rather than a broken exporter.
+    async fn events(
+        &self,
+        chain: &ChainId,
+        seq_from: u64,
+        seq_to: u64,
+    ) -> Result<Vec<AuditEvent>, ControlError> {
+        let rows = self
+            .client
+            .query(
+                "SELECT ?fields FROM audit_events \
+                 WHERE tenant_id = ? AND system_id = ? AND seq BETWEEN ? AND ? \
+                 ORDER BY seq",
+            )
+            .bind(&chain.tenant_id)
+            .bind(&chain.system_id)
+            .bind(seq_from)
+            .bind(seq_to)
+            .fetch_all::<AuditEventRow>()
+            .await
+            .map_err(|e| source_err(&e))?;
+
+        rows.into_iter()
+            .map(|r| {
+                AuditEvent::try_from(r).map_err(|e| {
+                    // Refused, not skipped. A row this build cannot read is a
+                    // hole in the evidence, and an export that quietly steps
+                    // over one hands an auditor a chain with a gap that
+                    // verifies — the worst possible outcome.
+                    ControlError::Db(format!("chain {chain}: {e}"))
+                })
+            })
+            .collect()
     }
 }

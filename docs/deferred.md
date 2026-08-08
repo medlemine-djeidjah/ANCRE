@@ -26,9 +26,14 @@ real ClickHouse, Postgres and NATS — which is the first time that sentence has
 been true, and it immediately found a bug that no fake could have (see the
 cleared list).
 
-What remains is **packaging and export**: there are no Dockerfiles, and — the
-sharper of the two — there is no way to get a chain *out* of the store and in
-front of an auditor. B3 and B6.
+A chain can now be handed to someone. `GET /v1/chains/{tenant}/{system}/events`
+streams the events as JSONL, which is what `ancre-verify --chain -` already
+reads, so the demo is a pipe — and tampering with a row directly in ClickHouse
+is caught by it, named by seq, exit code 1.
+
+What remains is **packaging**: there are no Dockerfiles, so none of this is one
+command yet. That is B3, and it is the last thing between here and a stranger
+getting a verified chain unaided.
 
 ---
 
@@ -39,7 +44,6 @@ Nothing here is optional before anyone can run this in front of real traffic.
 | # | Item | Where | Kind |
 |---|---|---|---|
 | B3 | **No Dockerfiles.** `compose.yaml` references `Dockerfile.gateway`, `.control`, `.ingester`; none exist, so `docker compose up` fails immediately. No seed data either, so "working, seeded" is unmet in two ways. `ANCRE_SIGNING_KEY_PATH` also points at `/run/secrets/`, which the control plane cannot create a key in | `deploy/compose/` | M5 |
-| B6 | **A chain cannot be exported.** `ancre-verify` reads JSONL and nothing produces JSONL from ClickHouse, so the events this system exists to produce are verifiable in principle and unreachable in practice. The demo ends at "trust this SQL query", which is the opposite of the pitch | `ancre-verify/`, `ancre-ingester/src/clickhouse.rs` | M5 |
 
 ## Evidence gaps
 
@@ -47,7 +51,7 @@ Things that affect what an auditor can be shown.
 
 | # | Item | Where | Kind |
 |---|---|---|---|
-| E3 | **No evidence pack.** `ancre-verify` reads a JSONL chain (`--chain`). The `--pack` flag in the original spec does not exist yet: no manifest, no bundled public keys, no bundled verifier binary | `ancre-verify/` | V1 |
+| E3 | **No evidence pack.** The three pieces an auditor needs are each served now — events from `/v1/chains/…/events`, signatures from `/v1/checkpoints/…`, keys from `/v1/pubkeys` — but nothing bundles them. `--pack` in the original spec means one artefact with a manifest, the keys and a verifier binary inside it, so that verification needs no network and no instructions. Three curls and a README is the interim | `ancre-verify/` | V1 |
 | E4 | **`gateway_version` is a lie.** The constant ends in `+unknown` instead of a git SHA, so the pin cannot identify the build that served a request. A `build.rs` fixes it; until then this pin is not evidence | `ancre-gateway/src/lib.rs` | **debt** |
 | E6 | **`telemetry.dropped` is never emitted.** Drops are counted and the window is recorded, but no code turns a `DropWindow` into an event. The gap is countable in a metric and invisible in the chain | `ancre-gateway/src/telemetry.rs` | M5 |
 | E10 | **`changed_fields` is derived, never stored.** The frozen schema has no column for it and will not grow one, so `config.generation.applied` pins the before/after `config_hash` in `request_digest`/`response_digest` and the field-level diff is recomputed from the two snapshots. Nothing yet *does* the recomputation, and nothing yet retains snapshots by content hash — `GET /v1/snapshot` serves only the current one | `ancre-control/src/api.rs` | V1 |
@@ -79,6 +83,13 @@ Kept briefly so the history is readable; delete at the end of M5.
   `ChainWriter`, with the daily heartbeat driven from that same loop, because
   one writer per chain is a correctness requirement and a heartbeat is an
   append like any other
+- ~~B6 a chain cannot be exported~~ — `GET /v1/chains/{tenant}/{system}/events`,
+  streamed and paged so resident memory is bounded by the page and not by the
+  chain. The format is the dullest available — one JSON event per line, exactly
+  what the verifier already parses — so there is no new encoding to get wrong.
+  The row mapping is the ingester's, imported rather than copied: it is
+  hash-critical, and a second copy would fail as a broken chain rather than a
+  broken exporter
 - ~~every completed request was recorded as `interrupted`~~ — found by running
   the three binaries together, not by any test. Hyper stops polling a body once
   its last byte is written, so `poll_frame` never returned `None` and the tap
@@ -119,6 +130,7 @@ Shortcuts. Each one is cheap now and expensive later.
 | D3 | **Multi-line SSE `data:` fields take the first line.** Legal in SSE, emitted by no LLM provider, and joining fragments would allocate on the hot path | `ancre-provider/src/sse.rs` | A future provider's pins are silently truncated |
 | D4 | **`bench-drift` does not gate.** Criterion alone cannot fail a build; it needs `critcmp` against a stored baseline | `.github/workflows/ci.yml` | Slow drift between the absolute gates goes unnoticed |
 | D5 | **CI has never run.** No git remote, no GitHub repo. Every command in the workflow passes locally — including the new `transports` job, run container-for-container as written — but the `latency-gate` job on a shared runner will be noisier than a 20-core dev box | `.github/workflows/ci.yml` | The first push is a surprise; expect to tune thresholds or mark the gate advisory |
+| D17 | **The export endpoint is unauthenticated,** like the checkpoints it sits beside — but unlike a checkpoint it serves *content*. Digests rather than prompts and completions, so no payload leaks, yet `system_id`, timings, token counts and model versions are a competitive picture of how a customer runs their AI. Authz for the read API is V1; until then a deployment that cares has to put its own gateway in front | `ancre-control/src/api.rs` | A customer's AI usage profile is readable by anyone who can reach the control plane |
 | D15 | **Heartbeats only cover chains this process has already seen.** `Ingester::heartbeats` walks its live `ChainWriter`s, and a restart starts with none — so a system that goes quiet across a restart stops emitting the daily heartbeat that makes its silence countable. Absence of evidence and absence of a system look identical again, which is the exact thing the heartbeat exists to prevent (mvp-plan §8.4). The fix is seeding writers from the store's chain list at startup | `ancre-ingester/src/pipeline.rs` | A silent system is indistinguishable from a decommissioned one, after any restart |
 | D16 | **The gateway trusts the first snapshot it is handed.** Cold start retries for 60s and then exits, which is right, but there is no lower bound on what it will accept — an empty registry publishes an empty snapshot, and the gateway installs it and serves 503s for every key. Correct behaviour for an empty registry; indistinguishable from a misconfigured one | `ancre-gateway/src/main.rs` | A registry pointed at the wrong database looks like a working gateway with no customers |
 | D14 | **Generation allocation is serialised; publication is not.** `allocate_generation` holds an advisory lock, so two control-plane replicas never mint the same number. The bus send happens after the lock is released, so replica A can allocate 42, replica B allocate 43 and publish first, and A's 42 lands after it. `PinResolver::reload` installs whatever it is given, so a gateway would go backwards a generation until the next publish. One replica is the MVP deployment and the fix is a monotonicity check in `reload`, which is cheap — it is listed rather than done because the check needs a decision about what a gateway should do when it *legitimately* sees a lower generation after a control-plane rollback | `ancre-control/src/postgres.rs`, `ancre-resolver/src/lib.rs` | Two replicas can flip a fleet between two configurations |

@@ -7,13 +7,13 @@ serving traffic.
 
 The deterministic encoder, the hash chain, the offline verifier, the in-path
 pin resolver, the request pipeline, the ingester's chaining and the control
-plane's snapshot build and checkpoint signing are real and tested — 310 tests,
-both hash back-ends, both latency gates passing. Thirty-two of those run
+plane's snapshot build and checkpoint signing are real and tested — 322 tests,
+both hash back-ends, both latency gates passing. Thirty-four of those run
 against a real ClickHouse, Postgres and NATS.
 
-What remains is packaging: the gateway and ingester binaries do not yet
-assemble the transports that exist behind them, and there are no Dockerfiles.
-`docs/deferred.md` lists every gap, with what it costs.
+All three binaries run and talk to each other, and a chain can be exported and
+verified. What remains is packaging: there are no Dockerfiles, so none of it is
+one command yet. `docs/deferred.md` lists every gap, with what it costs.
 
 ## Documents
 
@@ -176,6 +176,44 @@ Design decisions worth knowing:
   400. A wrong event is worse than a rejected request.
 - **`emit()` returns nothing.** No caller on the request path may branch on
   telemetry success — a full channel drops, counts, and keeps serving.
+
+## The whole thing, end to end
+
+Three processes, three dependencies, one pipe. Traffic goes through the gateway;
+what comes out the other end is a chain anybody can check.
+
+```sh
+curl -s localhost:8081/v1/chains/acme/hr-screening/events | ancre-verify --chain -
+```
+
+```
+Chain verified: 30 events, seq 1–30, no violations.
+  range root: fdfdd912838cfa4af13cd2a07283adb3e86e6692be9c4e5a1dd40f3a0c7fa9bc
+  chain head: 47caa5f14360ee63113f3bad632a4edd03867ec5b0ae3f1f86b16b70cddec785
+```
+
+Then edit one row directly in ClickHouse — the database the events live in,
+with full DDL rights:
+
+```sh
+clickhouse-client -q "ALTER TABLE ancre.audit_events UPDATE tokens_out = 999 WHERE seq = 17"
+curl -s localhost:8081/v1/chains/acme/hr-screening/events | ancre-verify --chain -
+```
+
+```
+VERIFICATION FAILED: 30 events, seq 1–30, 1 violation.
+  - event 17 was altered after it was sealed: it records hash b118141240f89bc9…
+    but its contents hash to 1395cac429dd87cc…
+```
+
+Append-only is enforced by the hash chain, not by the engine. That is the point
+of the chain: the store is not trusted, and neither is the person who runs it.
+
+The events are served as newline-delimited JSON, which is exactly what the
+verifier reads — no pack format, no manifest, nothing to get wrong between the
+two. Signed checkpoints come from `/v1/checkpoints/{tenant}/{system}` and the
+public keys from `/v1/pubkeys`, so verification needs the chain and one 32-byte
+key and no network at all.
 
 ## What M4 and M5 established
 

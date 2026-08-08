@@ -13,7 +13,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 
-use crate::checkpointer::{CheckpointStore, PublicKeyRecord};
+use crate::checkpointer::{ChainSource, CheckpointStore, PublicKeyRecord};
+use crate::export::{ChainExport, PAGE, to_jsonl};
 use crate::registry::ControlError;
 
 /// What the API can read. A trait per concern rather than one god-object, so
@@ -39,13 +40,17 @@ pub trait KeyDirectory: Send + Sync + 'static {
     ) -> impl std::future::Future<Output = Result<Vec<PublicKeyRecord>, ControlError>> + Send;
 }
 
-pub struct ControlState<S, C, K> {
+pub struct ControlState<S, C, K, X> {
     pub snapshots: S,
     pub checkpoints: C,
     pub keys: K,
+    /// The event store, for export. Held as `Arc` because the streaming body
+    /// outlives the handler that created it — the response starts before the
+    /// last page has been read.
+    pub chains: std::sync::Arc<X>,
 }
 
-impl<S, C, K> std::fmt::Debug for ControlState<S, C, K> {
+impl<S, C, K, X> std::fmt::Debug for ControlState<S, C, K, X> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ControlState").finish_non_exhaustive()
     }
@@ -56,6 +61,7 @@ impl<S, C, K> std::fmt::Debug for ControlState<S, C, K> {
 ///   GET  /v1/snapshot                    — current spec + generation, for the poll backstop
 ///   GET  /v1/prompts/{hash}              — lazy prompt body fetch
 ///   GET  /v1/checkpoints/{tenant}/{system} — signed checkpoints for the verifier
+///   GET  /v1/chains/{tenant}/{system}/events — the chain itself, as JSONL
 ///   GET  /v1/pubkeys                     — every public key that was ever valid, with windows
 ///
 /// Registry CRUD, oversight, and evidence-pack export are V1.
@@ -63,29 +69,45 @@ impl<S, C, K> std::fmt::Debug for ControlState<S, C, K> {
 /// Everything here is a read. The registry is edited out of band in the MVP —
 /// a write API that can change what a customer's pins mean needs authz and an
 /// audit trail of its own, and half of one is worse than none.
-pub fn router<S: SnapshotApi, C: CheckpointStore + 'static, K: KeyDirectory>(
-    state: Arc<ControlState<S, C, K>>,
+pub fn router<S: SnapshotApi, C: CheckpointStore + 'static, K: KeyDirectory, X: Chains>(
+    state: Arc<ControlState<S, C, K, X>>,
 ) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
-        .route("/v1/snapshot", get(snapshot::<S, C, K>))
-        .route("/v1/prompts/{hash}", get(prompt::<S, C, K>))
+        .route("/v1/snapshot", get(snapshot::<S, C, K, X>))
+        .route("/v1/prompts/{hash}", get(prompt::<S, C, K, X>))
         .route(
             "/v1/checkpoints/{tenant}/{system}",
-            get(checkpoints::<S, C, K>),
+            get(checkpoints::<S, C, K, X>),
         )
-        .route("/v1/pubkeys", get(pubkeys::<S, C, K>))
+        .route(
+            "/v1/chains/{tenant}/{system}/events",
+            get(events::<S, C, K, X>),
+        )
+        .route("/v1/pubkeys", get(pubkeys::<S, C, K, X>))
         .with_state(state)
 }
 
-async fn snapshot<S: SnapshotApi, C: CheckpointStore + 'static, K: KeyDirectory>(
-    State(state): State<Arc<ControlState<S, C, K>>>,
+/// What the export endpoint needs: the head, so a caller can omit the range,
+/// and the events themselves.
+pub trait Chains: ChainSource + ChainExport + 'static {}
+impl<T: ChainSource + ChainExport + 'static> Chains for T {}
+
+/// `?from=` and `?to=`, both optional and both inclusive.
+#[derive(Debug, serde::Deserialize)]
+pub struct Range {
+    pub from: Option<u64>,
+    pub to: Option<u64>,
+}
+
+async fn snapshot<S: SnapshotApi, C: CheckpointStore + 'static, K: KeyDirectory, X: Chains>(
+    State(state): State<Arc<ControlState<S, C, K, X>>>,
 ) -> Result<Json<SnapshotEnvelope>, ApiError> {
     Ok(Json(state.snapshots.current().await?))
 }
 
-async fn prompt<S: SnapshotApi, C: CheckpointStore + 'static, K: KeyDirectory>(
-    State(state): State<Arc<ControlState<S, C, K>>>,
+async fn prompt<S: SnapshotApi, C: CheckpointStore + 'static, K: KeyDirectory, X: Chains>(
+    State(state): State<Arc<ControlState<S, C, K, X>>>,
     Path(hash): Path<String>,
 ) -> Result<Vec<u8>, ApiError> {
     state
@@ -100,8 +122,8 @@ async fn prompt<S: SnapshotApi, C: CheckpointStore + 'static, K: KeyDirectory>(
 /// Unauthenticated on purpose: a checkpoint is a signature over a root hash.
 /// It reveals no prompt, no completion and no subject, and an auditor who has
 /// to obtain a credential before verifying is an auditor who verifies less.
-async fn checkpoints<S: SnapshotApi, C: CheckpointStore + 'static, K: KeyDirectory>(
-    State(state): State<Arc<ControlState<S, C, K>>>,
+async fn checkpoints<S: SnapshotApi, C: CheckpointStore + 'static, K: KeyDirectory, X: Chains>(
+    State(state): State<Arc<ControlState<S, C, K, X>>>,
     Path((tenant_id, system_id)): Path<(String, String)>,
 ) -> Result<Json<Vec<Checkpoint>>, ApiError> {
     let chain = ChainId {
@@ -111,11 +133,102 @@ async fn checkpoints<S: SnapshotApi, C: CheckpointStore + 'static, K: KeyDirecto
     Ok(Json(state.checkpoints.list(&chain).await?))
 }
 
+/// The chain itself, newline-delimited, streamed.
+///
+/// Unauthenticated for the same reason the checkpoints are — with one more
+/// consideration that cuts the other way, and is worth being explicit about:
+/// unlike a checkpoint, **this is the content**. Digests rather than prompts
+/// and completions, so no payload leaks, but `system_id`, timings, token
+/// counts and model versions are a competitive picture of how a customer runs
+/// their AI. Deployments that care will put this behind their own gateway.
+/// Authz for the read API is V1, and it is listed in `docs/deferred.md` rather
+/// than half-built here.
+///
+/// Streamed page by page: the response starts before the chain has been read,
+/// and resident memory is bounded by `PAGE` rather than by chain length. A
+/// failure part-way through **truncates the body** — there is no way to change
+/// a status code that has already been sent. The verifier's answer to a
+/// truncated chain is the right one anyway: it reports the range it actually
+/// saw, so a short export reads as a short export and not as a clean chain.
+async fn events<S: SnapshotApi, C: CheckpointStore + 'static, K: KeyDirectory, X: Chains>(
+    State(state): State<Arc<ControlState<S, C, K, X>>>,
+    Path((tenant_id, system_id)): Path<(String, String)>,
+    axum::extract::Query(range): axum::extract::Query<Range>,
+) -> Result<Response, ApiError> {
+    let chain = ChainId {
+        tenant_id,
+        system_id,
+    };
+
+    // The head is read once, up front. Paging to a moving target would let the
+    // export chase a chain that is still being written and never finish; a
+    // fixed upper bound means the export is a snapshot of a prefix, which is
+    // exactly what a checkpoint attests anyway.
+    let head = state.chains.head_seq(&chain).await?.unwrap_or(0);
+    let from = range.from.unwrap_or(1).max(1);
+    let to = range.to.unwrap_or(head).min(head);
+
+    // The filename is built before the chain moves into the stream, which owns
+    // it for as long as the response body is being written.
+    let filename = format!(
+        "{}-{}-{from}-{to}.jsonl",
+        chain_token(&chain.tenant_id),
+        chain_token(&chain.system_id)
+    );
+
+    let chains = Arc::clone(&state.chains);
+    let stream = futures_util::stream::try_unfold(from, move |next| {
+        let chains = Arc::clone(&chains);
+        let chain = chain.clone();
+        async move {
+            if next > to {
+                return Ok::<_, ControlError>(None);
+            }
+            let last = next.saturating_add(PAGE - 1).min(to);
+            let events = chains.events(&chain, next, last).await?;
+            // A page that comes back empty inside a range that should hold
+            // events means the store lost rows under us. Stopping here is what
+            // makes that a visibly short export rather than an infinite loop.
+            if events.is_empty() {
+                return Ok(None);
+            }
+            let bytes = to_jsonl(&events)?;
+            Ok(Some((axum::body::Bytes::from(bytes), last + 1)))
+        }
+    });
+
+    Response::builder()
+        .status(StatusCode::OK)
+        // The registered type for newline-delimited JSON. Browsers download it
+        // rather than trying to render a million-line document.
+        .header("content-type", "application/x-ndjson")
+        .header(
+            "content-disposition",
+            format!("attachment; filename=\"{filename}\""),
+        )
+        .body(axum::body::Body::from_stream(stream))
+        .map_err(|e| ApiError::Control(ControlError::Db(e.to_string())))
+}
+
+/// A filename is not a security boundary, but it is a place a `/` or a quote
+/// ends up in a header. Keep it to characters that cannot restructure one.
+fn chain_token(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 /// **Every** key, not the current one. Rotation must not invalidate old
 /// checkpoints, so a verifier handed a two-year-old range needs the key that
 /// signed it and the window it was valid in.
-async fn pubkeys<S: SnapshotApi, C: CheckpointStore + 'static, K: KeyDirectory>(
-    State(state): State<Arc<ControlState<S, C, K>>>,
+async fn pubkeys<S: SnapshotApi, C: CheckpointStore + 'static, K: KeyDirectory, X: Chains>(
+    State(state): State<Arc<ControlState<S, C, K, X>>>,
 ) -> Result<Json<Vec<PublicKeyRecord>>, ApiError> {
     Ok(Json(state.keys.public_keys().await?))
 }
@@ -209,19 +322,20 @@ mod tests {
         };
         source.append(&chain, 20);
         let cp = Checkpointer::new(
-            source,
+            Arc::new(source),
             MemoryCheckpoints::default(),
             CheckpointSigner::from_bytes([3u8; 32], "cp-2".into()),
         );
         cp.tick(Timestamp::from_micros(1_754_400_000_000_000))
             .await
             .unwrap();
-        let (_, store, _) = cp.into_parts();
+        let (source, store, _) = cp.into_parts();
 
         router(Arc::new(ControlState {
             snapshots: Snapshots(std::sync::Mutex::new(published)),
             checkpoints: store,
             keys: Keys,
+            chains: source,
         }))
     }
 
@@ -327,5 +441,74 @@ mod tests {
             "the retired key keeps its window"
         );
         assert!(keys[1].valid_to.is_none(), "exactly one active key");
+    }
+
+    /// The endpoint the whole product ends at: a chain an auditor can pipe
+    /// straight into `ancre-verify`.
+    #[tokio::test]
+    async fn the_chain_exports_as_jsonl_that_verifies() {
+        let app = app(None).await;
+        let (status, body) = get_body(&app, "/v1/chains/acme/hr-screening/events").await;
+        assert_eq!(status, StatusCode::OK);
+
+        // Parsed exactly the way the verifier parses it — one JSON event per
+        // line, nothing else in the body.
+        let events: Vec<ancre_types::AuditEvent> = String::from_utf8(body)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).expect("every line must parse"))
+            .collect();
+        assert_eq!(events.len(), 20);
+
+        let report = ancre_chain::verify_range(events, ancre_canon::GENESIS);
+        assert!(
+            report.is_clean(),
+            "an exported chain must verify: {:?}",
+            report.violations
+        );
+        assert_eq!(report.seq_to, 20);
+    }
+
+    #[tokio::test]
+    async fn an_export_range_is_inclusive_at_both_ends() {
+        let app = app(None).await;
+        let (status, body) =
+            get_body(&app, "/v1/chains/acme/hr-screening/events?from=5&to=9").await;
+        assert_eq!(status, StatusCode::OK);
+
+        let lines: Vec<_> = String::from_utf8(body)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(lines.len(), 5);
+
+        let first: ancre_types::AuditEvent = serde_json::from_str(&lines[0]).unwrap();
+        let last: ancre_types::AuditEvent = serde_json::from_str(&lines[4]).unwrap();
+        assert_eq!(first.seq, 5);
+        assert_eq!(last.seq, 9);
+    }
+
+    /// A chain nobody has written to is an empty export, not a 404. "No events
+    /// yet" and "no such system" look the same from here, and inventing a
+    /// distinction the store cannot support would be a lie either way.
+    #[tokio::test]
+    async fn an_unknown_chain_exports_nothing_rather_than_failing() {
+        let app = app(None).await;
+        let (status, body) = get_body(&app, "/v1/chains/acme/no-such-system/events").await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.is_empty());
+    }
+
+    /// A range past the head is clamped rather than padded or refused: the
+    /// export is a prefix of the chain, and asking for more than exists is a
+    /// reasonable thing for a script to do.
+    #[tokio::test]
+    async fn a_range_past_the_head_stops_at_the_head() {
+        let app = app(None).await;
+        let (status, body) =
+            get_body(&app, "/v1/chains/acme/hr-screening/events?from=18&to=9999").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(String::from_utf8(body).unwrap().lines().count(), 3);
     }
 }

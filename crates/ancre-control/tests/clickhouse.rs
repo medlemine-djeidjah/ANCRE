@@ -21,6 +21,7 @@ use ancre_canon::GENESIS;
 use ancre_chain::{ChainId, CheckpointSigner, verify_checkpoint};
 use ancre_control::checkpointer::{ChainSource, CheckpointStore, Checkpointer};
 use ancre_control::clickhouse::ClickHouseChains;
+use ancre_control::export::ChainExport;
 use ancre_control::postgres::PgStore;
 use ancre_ingester::clickhouse::ClickHouseStore;
 use ancre_ingester::pipeline::Ingester;
@@ -187,4 +188,72 @@ async fn a_chain_written_by_the_ingester_is_sealed_and_verifies_offline() {
         1,
         "a chain with nothing new must not be resealed (report: {again:?})"
     );
+}
+
+/// The product's last mile, against both real datastores: the ingester writes a
+/// chain into ClickHouse, the export endpoint streams it as JSONL, and what
+/// comes out the other end verifies as a chain.
+///
+/// Deliberately larger than one page, because the paging is where an export
+/// silently loses or repeats events — and either produces a body that parses
+/// perfectly and attests the wrong thing.
+#[tokio::test]
+async fn an_exported_chain_streams_as_jsonl_and_verifies() {
+    let source = chains_or_skip!();
+    let chain = chain("export");
+    let n = 2_500;
+    seed(&chain, n).await;
+
+    let events = source.events(&chain, 1, n).await.unwrap();
+    assert_eq!(events.len() as u64, n);
+
+    // Through the serialisation the endpoint uses, then through the parse the
+    // verifier uses. Both halves, or this proves only that ClickHouse round
+    // trips.
+    let jsonl = ancre_control::export::to_jsonl(&events).unwrap();
+    let parsed: Vec<ancre_types::AuditEvent> = String::from_utf8(jsonl)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("every line must parse"))
+        .collect();
+
+    assert_eq!(parsed.len() as u64, n);
+    for (i, event) in parsed.iter().enumerate() {
+        assert_eq!(event.seq, i as u64 + 1, "seq order is load-bearing");
+    }
+
+    let report = ancre_chain::verify_range(parsed, GENESIS);
+    assert!(
+        report.is_clean(),
+        "the exported chain must verify: {:?}",
+        report.violations
+    );
+    assert_eq!(report.seq_to, n);
+}
+
+/// Paging must not drop or duplicate an event at a page boundary. Read in
+/// pages the way the endpoint does and compare against one flat read.
+#[tokio::test]
+async fn paging_reassembles_exactly_the_flat_read() {
+    let source = chains_or_skip!();
+    let chain = chain("paging");
+    let n = 1_000;
+    seed(&chain, n).await;
+
+    let flat = source.events(&chain, 1, n).await.unwrap();
+
+    let page = 137; // deliberately not a divisor of n
+    let mut paged = Vec::new();
+    let mut next = 1;
+    while next <= n {
+        let last = (next + page - 1).min(n);
+        paged.extend(source.events(&chain, next, last).await.unwrap());
+        next = last + 1;
+    }
+
+    assert_eq!(paged.len(), flat.len());
+    for (a, b) in paged.iter().zip(&flat) {
+        assert_eq!(a.seq, b.seq);
+        assert_eq!(a.event_hash, b.event_hash);
+    }
 }

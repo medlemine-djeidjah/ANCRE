@@ -82,7 +82,10 @@ async fn main() -> Result<(), Fatal> {
         "checkpoint signing key active"
     );
 
-    let checkpointer = Checkpointer::new(chains, postgres.clone(), signer);
+    // One ClickHouse client, two readers: the checkpointer walks it on a timer
+    // and the export endpoint streams from it on demand.
+    let chains = std::sync::Arc::new(chains);
+    let checkpointer = Checkpointer::new(std::sync::Arc::clone(&chains), postgres.clone(), signer);
 
     let state = Arc::new(ControlState {
         snapshots: SnapshotBuilder::new(
@@ -94,6 +97,7 @@ async fn main() -> Result<(), Fatal> {
         ),
         checkpoints: postgres.clone(),
         keys: postgres,
+        chains,
     });
 
     // One publish before the socket is bound. A gateway that starts alongside
@@ -126,10 +130,11 @@ async fn main() -> Result<(), Fatal> {
 /// Rebuild and republish on a timer. Errors are logged and the loop continues:
 /// a registry that is briefly unreachable must not stop the one that comes
 /// back, and the gateways are already covered by their staleness budget.
-async fn publish_loop<R, B>(state: Arc<ControlState<SnapshotBuilder<R, B>, PgStore, PgStore>>)
+async fn publish_loop<R, B, X>(state: Arc<ControlState<SnapshotBuilder<R, B>, PgStore, PgStore, X>>)
 where
     R: ancre_control::Registry + 'static,
     B: ancre_control::SnapshotBus + 'static,
+    X: ancre_control::api::Chains,
 {
     let mut ticker = tokio::time::interval(PUBLISH_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
