@@ -40,6 +40,63 @@ jobs:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
 
+  # The transports, against the real thing.
+  #
+  # Every one of these suites is a no-op without its `ANCRE_TEST_*` variable,
+  # which is what keeps `cargo test` green on a laptop with no Docker — and
+  # exactly why they need a job that always sets them. A test that runs only
+  # when someone remembers to export a variable is a test that rots, and the
+  # four bugs the first real ClickHouse run found were all invisible to the
+  # unit tests.
+  #
+  # `docker run` rather than `services:`, because ClickHouse and Postgres need
+  # their init SQL mounted from the repo and a service container cannot see it.
+  transports:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Start ClickHouse, Postgres and NATS
+        run: |
+          docker run -d --name ancre-ch -p 18123:8123 \
+            -e CLICKHOUSE_USER=ancre -e CLICKHOUSE_PASSWORD=ancre -e CLICKHOUSE_DB=ancre \
+            -v "$PWD/deploy/compose/init/clickhouse:/docker-entrypoint-initdb.d:ro" \
+            --ulimit nofile=262144:262144 \
+            clickhouse/clickhouse-server:24.8
+          docker run -d --name ancre-pg -p 15432:5432 \
+            -e POSTGRES_USER=ancre -e POSTGRES_PASSWORD=ancre -e POSTGRES_DB=ancre \
+            -v "$PWD/deploy/compose/init/postgres:/docker-entrypoint-initdb.d:ro" \
+            postgres:16-alpine
+          docker run -d --name ancre-nats -p 14222:4222 nats:2.10-alpine -js -sd /data
+
+      - name: Wait for them to accept connections
+        run: |
+          for _ in $(seq 1 60); do
+            docker exec ancre-pg pg_isready -U ancre -d ancre >/dev/null 2>&1 && break
+            sleep 1
+          done
+          for _ in $(seq 1 60); do
+            curl -sf "http://127.0.0.1:18123/?user=ancre&password=ancre" \
+              --data "SELECT count() FROM ancre.audit_events" >/dev/null && break
+            sleep 1
+          done
+
+      # Serialised: the suites share one Postgres, and one of them resets the
+      # tables between cases.
+      - name: Run the transport suites
+        env:
+          ANCRE_TEST_CLICKHOUSE: http://127.0.0.1:18123
+          ANCRE_TEST_POSTGRES: postgres://ancre:ancre@127.0.0.1:15432/ancre
+          ANCRE_TEST_NATS: nats://127.0.0.1:14222
+        run: |
+          cargo test -p ancre-ingester --test clickhouse -- --test-threads=1
+          cargo test -p ancre-ingester --test bus -- --test-threads=1
+          cargo test -p ancre-control --test postgres -- --test-threads=1
+          cargo test -p ancre-control --test clickhouse -- --test-threads=1
+          cargo test -p ancre-control --test bus -- --test-threads=1
+
   # The latency claim is a product feature, so missing it fails the build.
   #
   # This checks the absolute targets in resolver spec §9 against raw

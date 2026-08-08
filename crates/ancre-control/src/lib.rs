@@ -12,15 +12,21 @@
 //! abutment of checkpoint ranges.
 
 pub mod api;
+pub mod bus;
 pub mod checkpointer;
+pub mod clickhouse;
 pub mod envelope;
 pub mod keys;
+pub mod postgres;
 pub mod registry;
 pub mod snapshot;
 
 pub use ancre_types::{SNAPSHOT_SUBJECT, SnapshotEnvelope};
-pub use checkpointer::{Checkpointer, PublicKeyRecord, SealReport};
+pub use bus::NatsSnapshotBus;
+pub use checkpointer::{ChainSource, CheckpointStore, Checkpointer, PublicKeyRecord, SealReport};
+pub use clickhouse::ClickHouseChains;
 pub use envelope::SnapshotBus;
 pub use keys::KeyRing;
+pub use postgres::PgStore;
 pub use registry::{ControlError, Registry};
 pub use snapshot::{Published, SnapshotBuilder};

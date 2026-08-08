@@ -72,7 +72,7 @@ ed25519-dalek = { version = "2", features = ["rand_core", "pkcs8"] }
 rand = "0.8"
 
 # infra
-sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "time", "macros"] }
+sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "time", "json", "macros"] }
 clickhouse = { version = "0.13", features = ["time", "uuid"] }
 async-nats = "0.38"
 

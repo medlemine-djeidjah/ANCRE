@@ -3,12 +3,17 @@
 An LLM gateway that produces regulator-grade evidence as a side effect of
 serving traffic.
 
-**Status: M1–M3 complete; M4–M5 scaffolded.**
+**Status: M1–M4 complete; M5 in progress.**
 
 The deterministic encoder, the hash chain, the offline verifier, the in-path
-pin resolver and the request pipeline are real and tested — 176 tests, both
-hash back-ends, both latency gates passing. What remains is persistence: the
-ingester, the control plane, and checkpoint signing.
+pin resolver, the request pipeline, the ingester's chaining and the control
+plane's snapshot build and checkpoint signing are real and tested — 310 tests,
+both hash back-ends, both latency gates passing. Thirty-two of those run
+against a real ClickHouse, Postgres and NATS.
+
+What remains is packaging: the gateway and ingester binaries do not yet
+assemble the transports that exist behind them, and there are no Dockerfiles.
+`docs/deferred.md` lists every gap, with what it costs.
 
 ## Documents
 
@@ -172,13 +177,52 @@ Design decisions worth knowing:
 - **`emit()` returns nothing.** No caller on the request path may branch on
   telemetry success — a full channel drops, counts, and keeps serving.
 
-## Next: M4, persistence
+## What M4 and M5 established
 
-`ancre-ingester` and `ancre-control` — seq allocation, chain computation,
-ClickHouse batch insert, snapshot publication, ed25519 checkpoint signing.
+Persistence and the transports under it.
 
-Done when ClickHouse can be killed for ten minutes under load: the gateway is
-unaffected, the ingester catches up, and the chain verifies with no gap.
+- **The ingester owns `seq`.** The gateway never assigns one, so a skewed
+  clock on one node cannot reorder a chain. A batch the store refuses is
+  rolled back across every chain it touched and left unacked — acking a subset
+  would leave the store missing events the bus believes were consumed, and the
+  chain would resume past a gap it can never fill.
+- **Checkpoints are ed25519 over a tree root**, not over the last hash, so an
+  auditor can verify one event without replaying the chain. They live in
+  Postgres and not in ClickHouse: storing the attestation in the store it
+  attests to hands anyone who can rewrite the events the ability to re-sign
+  them.
+- **Rotation never invalidates an old checkpoint.** Every key that was ever
+  active stays exported with its window, and the windows abut exactly — a gap
+  would leave checkpoints sealed inside it unattributable to any key an
+  auditor holds.
+- **A generation is burned, never reused.** If the bus send fails after the
+  number is allocated, the next publish moves past it. Two configurations
+  sharing a `config_generation` would make every pin carrying it ambiguous
+  forever, which is worse than a gap in a counter.
+- **Round trips are hash-critical, so they are tested against real servers.**
+  `AuditEvent` is nested and the table is flat; a conversion that changes one
+  hashed byte leaves a chain that verifies inside the ingester and fails on the
+  auditor's laptop. The first run against a real ClickHouse found four bugs no
+  unit test could have.
+
+```sh
+docker run -d --name ancre-pg -p 15432:5432 \
+  -e POSTGRES_USER=ancre -e POSTGRES_PASSWORD=ancre -e POSTGRES_DB=ancre \
+  -v "$PWD/deploy/compose/init/postgres:/docker-entrypoint-initdb.d:ro" \
+  postgres:16-alpine
+ANCRE_TEST_POSTGRES=postgres://ancre:ancre@127.0.0.1:15432/ancre \
+  cargo test -p ancre-control --test postgres
+```
+
+Each transport suite is a no-op without its `ANCRE_TEST_*` variable, so
+`cargo test` stays green without Docker. CI's `transports` job always sets
+them.
+
+## Next: finish M5, packaging
+
+Dockerfiles, a seeded `docker compose up`, and the two `main`s that still need
+writing. Done when someone who has never seen the repo gets a verified chain
+without asking a question.
 
 ## Build
 

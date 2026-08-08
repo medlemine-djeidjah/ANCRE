@@ -11,16 +11,25 @@ Two categories, and the distinction matters:
 
 Update this file in the same commit that creates or clears an entry.
 
-Last updated: end of M4.
+Last updated: M5, after the control plane's datastores.
 
-M4 landed in two halves, and the seam between them is the honest summary of
-where this repo is: **the logic is written and gated; none of the transports
-are.** Chaining, rollback, dedupe, heartbeats, snapshot build, generation
-allocation, publication, checkpoint scheduling, key rotation, the read API and
-the gateway's config feed all exist and are tested against in-memory
-implementations of four traits — `EventStore`, `Registry`, `ChainSource`,
-`SnapshotBus`. Behind those traits there is no ClickHouse, no Postgres and no
-NATS, so all three binaries still exit non-zero saying so. That is B1–B5.
+The seam has moved. Through M4 the honest summary was "the logic is written and
+gated; none of the transports are". All four are now written and tested against
+real servers — the ClickHouse `EventStore`, the NATS `EventSink` and consumer,
+the Postgres `Registry`/`CheckpointStore`/`KeyDirectory`, the ClickHouse
+`ChainSource` and the NATS `SnapshotBus` — and 32 integration tests behind
+`ANCRE_TEST_*` gate them in CI's `transports` job.
+
+What remains is **wiring**: the control plane's `main` is written and runs, the
+gateway's and the ingester's are still stubs that exit non-zero. So the current
+summary is narrower and more embarrassing than the last one — the parts exist,
+two of the three processes do not yet assemble them. That is B1–B4.
+
+Note the two commits before this one added the ClickHouse and NATS transports
+without updating this file, so B2 and B4 described work that was already done.
+Corrected below — and the rule at the top of this file (update it in the same
+commit) is exactly what stops that drift, so it is worth restating rather than
+quietly fixing.
 
 ---
 
@@ -30,11 +39,10 @@ Nothing here is optional before anyone can run this in front of real traffic.
 
 | # | Item | Where | Kind |
 |---|---|---|---|
-| B1 | **The gateway serves nothing.** `ConfigFeed` verifies, installs and records a generation, and is tested — but `main` constructs no `SnapshotSource`, so the resolver stays cold and every request 503s. Loud on purpose: it warns at startup rather than pretending | `ancre-gateway/src/main.rs` | M5 |
-| B2 | **Audit events are discarded.** `LoggingSink` warns on every batch instead of publishing to NATS. Running this build in front of traffic loses the evidence it exists to produce | `ancre-gateway/src/main.rs` | M5 |
-| B3 | **No Dockerfiles.** `compose.yaml` references `Dockerfile.gateway`, `.control`, `.ingester`; none exist, so `docker compose up` fails immediately | `deploy/compose/` | M5 |
-| B4 | **The ingester has no transport.** Chaining, rollback, dedupe and heartbeats are implemented and tested against a fake store. The NATS consumer and the ClickHouse `EventStore` impl are not written | `ancre-ingester/src/main.rs` | M5 |
-| B5 | **The control plane has no datastores.** Build, publication, generation allocation, checkpointing, key rotation and the read API are implemented and tested; the Postgres `Registry`, the ClickHouse `ChainSource` and the NATS `SnapshotBus` are not written, so `main` exits non-zero | `ancre-control/src/main.rs` | M5 |
+| B1 | **The gateway serves nothing.** `ConfigFeed` verifies, installs and records a generation, and is tested — but `main` constructs no `SnapshotSource`, so the resolver stays cold and every request 503s. Loud on purpose: it warns at startup rather than pretending. Needs the HTTP poll against `GET /v1/snapshot` and a JetStream consumer on `ANCRE_CONFIG`, both of which the control plane now serves | `ancre-gateway/src/main.rs` | M5 |
+| B2 | **Audit events are discarded.** `NatsSink` is written and tested against a real broker, but `main` still installs `LoggingSink`, which warns on every batch. Running *this build* in front of traffic loses the evidence it exists to produce — one line in `main` away from not doing so | `ancre-gateway/src/main.rs` | M5 |
+| B3 | **No Dockerfiles.** `compose.yaml` references `Dockerfile.gateway`, `.control`, `.ingester`; none exist, so `docker compose up` fails immediately. No seed data either, so "working, seeded" is unmet in two ways | `deploy/compose/` | M5 |
+| B4 | **The ingester's `main` is a stub.** The NATS consumer, the ClickHouse `EventStore`, chaining, rollback, dedupe and heartbeats are all implemented and tested against real infrastructure; nothing assembles them into a process, so the binary exits non-zero | `ancre-ingester/src/main.rs` | M5 |
 
 ## Evidence gaps
 
@@ -49,20 +57,25 @@ Things that affect what an auditor can be shown.
 | E11 | **`config.generation.applied` overloads two columns.** `latency_ms` carries `propagation_ms` and `error_code` carries the change class. Both are documented at the call site and neither is wrong, but a reader of the raw table needs the event type to interpret them. The alternative was new columns, which the frozen encoding forbids | `ancre-gateway/src/config_feed.rs` | by design |
 | E8 | **`error_code` is only the HTTP status.** Provider error bodies are not parsed for a code, deliberately: guessing at a provider-specific shape would put a fabricated string in the evidence | `ancre-gateway/src/tap.rs` | by design |
 
-## Cleared in M4
+## Cleared in M5
 
-Kept briefly so the history is readable; delete at M5.
+Kept briefly so the history is readable; delete at the end of M5.
 
-- ~~E1 checkpoints unsigned~~ — ed25519 signing, `seal_range`, `verify_checkpoint`
-- ~~E2 no inclusion proofs~~ — RFC 6962 audit paths, `prove_inclusion` / `verify_inclusion`
-- ~~E5 no heartbeat emission~~ — `ChainWriter::heartbeat`, deterministic per (chain, day)
-- ~~E7 `config.generation.applied` never emitted~~ — `ConfigFeed::record`, one
-  event per affected chain, with `propagation_ms` and the substantial
-  candidate surfaced. What it cannot carry is now E10/E11
-- ~~E9 checkpoints never issued~~ — `Checkpointer::tick`, N-events-or-T-minutes
-  per chain, `KeyRing` rotation, `GET /v1/pubkeys`. Postgres storage is B5
-- ~~D6 `#![allow(dead_code, unreachable_pub)]`~~ — gone from both the ingester
-  and the control binary; nothing in the workspace suppresses either lint now
+- ~~B5 the control plane has no datastores~~ — `PgStore` behind `Registry`,
+  `CheckpointStore` and `KeyDirectory`; `ClickHouseChains` behind
+  `ChainSource`; `NatsSnapshotBus` behind `SnapshotBus`. `main` connects all
+  three, installs the signing key, publishes once before binding the socket and
+  serves the read API. 14 + 5 + 2 tests against real servers
+- ~~D13 nothing runs the checkpointer or the publish loop~~ — both are tasks in
+  `ancre-control/src/main.rs`, on 30s and 10s timers. A failing tick logs and
+  the loop continues: a control plane that exits takes the fleet's config
+  updates with it
+- ~~the transport suites never run~~ — CI's `transports` job starts ClickHouse,
+  Postgres and NATS and runs all five integration suites with their
+  `ANCRE_TEST_*` variables set. They stay no-ops on a laptop without Docker
+
+The M4 list is deleted; it is in the git history and the entries it cleared
+have not come back.
 
 ## Deferred by plan
 
@@ -86,16 +99,16 @@ Shortcuts. Each one is cheap now and expensive later.
 
 | # | Item | Where | Cost if ignored |
 |---|---|---|---|
-| D1 | **`verify_range` holds every leaf hash resident** to compute the range root — 32 bytes per event, so ~320MB for a 10M-event range. Fine for a pack today | `ancre-chain/src/verify.rs` | An auditor's laptop OOMs on a large range |
-| D2 | **`PromptRef::Inline` is never constructed.** `ConfigSnapshot::build` always produces `Lazy`, and nothing fetches bodies, so no prompt body is ever resident. Pins are unaffected — they only need the hash | `ancre-types`, `ancre-resolver` | Prompt bodies cannot be shown next to the events that used them |
+| D1 | **`verify_range` holds every leaf hash resident** to compute the range root — 32 bytes per event, so ~320MB for a 10M-event range. `ChainSource::leaves` has the same shape on the writing side: a checkpointer catching up over a long outage reads the whole range into memory. Fine for a pack today | `ancre-chain/src/verify.rs`, `ancre-control/src/clickhouse.rs` | An auditor's laptop OOMs on a large range; a catch-up tick OOMs the control plane |
+| D2 | **`PromptRef::Inline` is never constructed.** `ConfigSnapshot::build` always produces `Lazy`, and the gateway never fetches a body, so no prompt body is ever resident on the hot path. Pins are unaffected — they only need the hash. The control plane now *stores* bodies and serves them from `GET /v1/prompts/{hash}`, verified against their own key, so the missing half is the fetch and the resolver's LRU | `ancre-types`, `ancre-resolver` | Prompt bodies cannot be shown next to the events that used them |
 | D3 | **Multi-line SSE `data:` fields take the first line.** Legal in SSE, emitted by no LLM provider, and joining fragments would allocate on the hot path | `ancre-provider/src/sse.rs` | A future provider's pins are silently truncated |
 | D4 | **`bench-drift` does not gate.** Criterion alone cannot fail a build; it needs `critcmp` against a stored baseline | `.github/workflows/ci.yml` | Slow drift between the absolute gates goes unnoticed |
-| D5 | **CI has never run.** No git remote, no GitHub repo. Every command in the workflow passes locally, but the `latency-gate` job on a shared runner will be noisier than a 20-core dev box | `.github/workflows/ci.yml` | The first push is a surprise; expect to tune thresholds or mark the gate advisory |
-| D12 | **The control plane's poll backstop refuses to serve unpublished edits.** `current()` errors if the registry has changed since the last publish, rather than publishing on demand — safe, but it means an operator who edits the registry and forgets to publish sees 503s from `GET /v1/snapshot` with no hint that a publish is what is missing | `ancre-control/src/snapshot.rs` | An avoidable support call, and the error text is the only thing that prevents it |
-| D13 | **Nothing runs the checkpointer or the publish loop.** `tick()` and `publish()` are correct and tested; the task that calls them on a timer lives in `main`, which is not written | `ancre-control/src/main.rs` | Both are inert until the binary exists |
+| D5 | **CI has never run.** No git remote, no GitHub repo. Every command in the workflow passes locally — including the new `transports` job, run container-for-container as written — but the `latency-gate` job on a shared runner will be noisier than a 20-core dev box | `.github/workflows/ci.yml` | The first push is a surprise; expect to tune thresholds or mark the gate advisory |
+| D14 | **Generation allocation is serialised; publication is not.** `allocate_generation` holds an advisory lock, so two control-plane replicas never mint the same number. The bus send happens after the lock is released, so replica A can allocate 42, replica B allocate 43 and publish first, and A's 42 lands after it. `PinResolver::reload` installs whatever it is given, so a gateway would go backwards a generation until the next publish. One replica is the MVP deployment and the fix is a monotonicity check in `reload`, which is cheap — it is listed rather than done because the check needs a decision about what a gateway should do when it *legitimately* sees a lower generation after a control-plane rollback | `ancre-control/src/postgres.rs`, `ancre-resolver/src/lib.rs` | Two replicas can flip a fleet between two configurations |
+| D12 | **The control plane's poll backstop refuses to serve unpublished edits.** `current()` errors if the registry has changed since the last publish, rather than publishing on demand. Now that `main` runs a 10s publish loop the window is ten seconds rather than forever, so this has gone from a support call to a confusing 503 during a deploy — still worth a better error than the one it has | `ancre-control/src/snapshot.rs` | A 503 from `GET /v1/snapshot` that reads as an outage and is actually a race with the publish loop |
 | D7 | **No `cargo-deny` run locally.** It gates in CI, which has never run | — | A licence or advisory problem surfaces later than it should |
 | D9 | **The chaos gate uses an in-memory store.** It proves the chaining and rollback logic survives an outage, not that the ClickHouse client does. The real check needs a live ClickHouse | `bench/examples/chaos-gate.rs` | A ClickHouse-specific failure (partial batch, connection reset mid-insert) is untested |
-| D10 | **Dedupe is a bounded in-memory window** of 100 000 `event_id`s. The durable check has to be a unique index on `event_id` in ClickHouse, and that DDL is not written | `ancre-ingester/src/chain_writer.rs` | A redelivery older than the window doubles an event, and the chain still verifies |
+| D10 | **Dedupe is a bounded in-memory window** of 100 000 `event_id`s. The durable check has to be a unique index on `event_id` in ClickHouse, and that DDL is not written | `ancre-ingester/src/chain_writer.rs` | A redelivery older than the window doubles an event, the chain still verifies, and the checkpointer then refuses the range for good — `tick` compares the leaf count against the range and will not sign a root over a set it cannot account for, so that chain stops being attested |
 | D11 | **One `ChainWriter` per chain, unbounded.** An ingester serving ten thousand systems holds ten thousand writers, each with a dedupe window. No eviction | `ancre-ingester/src/pipeline.rs` | Memory grows with tenant count rather than with traffic |
 | D8 | **The provider-pinned-id heuristic is shape-based.** `looks_pinned` matches a trailing date. It errs toward flagging on purpose — a false `UnpinnedModel` costs a minute of review, a false "pinned" is evidence that lies | `ancre-provider/src/lib.rs` | A new provider id format reads as unpinned until the matcher learns it |
 

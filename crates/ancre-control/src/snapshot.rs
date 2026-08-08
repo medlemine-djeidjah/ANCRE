@@ -7,6 +7,7 @@
 use ancre_canon::Hash32;
 use ancre_types::{ConfigSnapshot, SnapshotEnvelope, SnapshotSpec};
 
+use crate::api::SnapshotApi;
 use crate::envelope::SnapshotBus;
 use crate::registry::{ControlError, Registry};
 
@@ -143,6 +144,27 @@ impl<R: Registry, B: SnapshotBus> SnapshotBuilder<R, B> {
         };
         spec.generation = generation;
         Ok(SnapshotEnvelope::seal(spec, hash))
+    }
+}
+
+/// The builder *is* the read API's snapshot source. Both endpoints answer from
+/// the registry, and giving the API its own path to it would let the two
+/// disagree about what is published.
+impl<R: Registry + 'static, B: SnapshotBus + 'static> SnapshotApi for SnapshotBuilder<R, B> {
+    async fn current(&self) -> Result<SnapshotEnvelope, ControlError> {
+        // The inherent method, which shadows this one at every call site.
+        Self::current(self).await
+    }
+
+    /// A hash that is not 64 hex characters is a 404 rather than a 503: the
+    /// request named something that cannot exist, which is the client's
+    /// mistake and not the control plane's condition. The poll backstop
+    /// distinguishes the two, so the distinction has to be real.
+    async fn prompt(&self, hash: &str) -> Result<Option<Vec<u8>>, ControlError> {
+        let Ok(hash) = Hash32::from_hex(hash) else {
+            return Ok(None);
+        };
+        self.registry.prompt(hash).await
     }
 }
 

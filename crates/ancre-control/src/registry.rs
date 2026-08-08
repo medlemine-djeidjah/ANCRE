@@ -18,18 +18,24 @@ use ancre_types::{KeyBindingSpec, SystemConfigSpec};
 /// two replicas holding identical data — which is resolver spec test 6 failing
 /// intermittently, on one node, under load.
 pub trait Registry: Send + Sync {
+    /// Every system in the fleet, not one tenant's.
+    ///
+    /// There is no tenant parameter and the `systems` table has no tenant
+    /// column: a snapshot is keyed by `system_id` alone, and the tenant a
+    /// system belongs to is knowable only through the keys bound to it. See
+    /// `deploy/compose/init/postgres/001_registry.sql`.
+    ///
     /// ```sql
     /// SELECT system_id, system_version, ifu_version, risk_class,
     ///        policy_id, policy_version, default_route
     ///   FROM systems
-    ///  WHERE tenant_id = $1 AND NOT archived
+    ///  WHERE NOT archived
     ///  ORDER BY system_id;
     /// -- routes, in their semantic order — first match wins, so `position` is
     /// -- data, not presentation:
     /// SELECT system_id, position, matcher, model_id, model_version,
     ///        prompt_id, prompt_version, prompt_hash
     ///   FROM routes
-    ///  WHERE tenant_id = $1
     ///  ORDER BY system_id, position;
     /// ```
     fn systems(
@@ -46,6 +52,23 @@ pub trait Registry: Send + Sync {
         &self,
     ) -> impl std::future::Future<Output = Result<Vec<KeyBindingSpec>, ControlError>> + Send;
 
+    /// A prompt body by content hash, for `PromptRef::Lazy` resolution and for
+    /// the evidence pack.
+    ///
+    /// ```sql
+    /// SELECT body FROM prompts WHERE prompt_hash = $1;
+    /// ```
+    ///
+    /// The body is expected to hash to its own key. An implementation that can
+    /// check that cheaply should, and should refuse a mismatch: a body that no
+    /// longer hashes to the `prompt_version` an event pinned is not the prompt
+    /// that event used, and serving it puts a plausible wrong answer in front
+    /// of an auditor.
+    fn prompt(
+        &self,
+        hash: Hash32,
+    ) -> impl std::future::Future<Output = Result<Option<Vec<u8>>, ControlError>> + Send;
+
     /// The last generation this control plane published, and what it contained.
     ///
     /// `None` before the first publish. The content hash comes back with it so
@@ -59,19 +82,23 @@ pub trait Registry: Send + Sync {
     ///
     /// ```sql
     /// BEGIN;
-    /// SELECT generation FROM snapshot_generations
-    ///   ORDER BY generation DESC LIMIT 1 FOR UPDATE;
-    /// INSERT INTO snapshot_generations (generation, content_hash, built_at)
-    ///   VALUES ($next, $2, now());
+    /// SELECT pg_advisory_xact_lock($lock);
+    /// INSERT INTO snapshot_generations (generation, content_hash)
+    ///   VALUES ((SELECT coalesce(max(generation), 0) + 1
+    ///              FROM snapshot_generations), $1);
     /// COMMIT;
     /// ```
     ///
-    /// The row lock is the point. Two control-plane replicas that both read
-    /// "41" and both write "42" would mint the same generation with different
+    /// The lock is the point. Two control-plane replicas that both read "41"
+    /// and both write "42" would mint the same generation with different
     /// contents — and then two gateway nodes would report identical
     /// `config_generation` pins for configurations that differ. The pin would
     /// be a number that identifies nothing, which is worse than no pin at all,
     /// because it looks like evidence.
+    ///
+    /// An *advisory* lock rather than `SELECT ... FOR UPDATE` on the highest
+    /// row, because an empty table has no row to lock — and the first-ever
+    /// generation is exactly when two replicas starting together collide.
     fn allocate_generation(
         &self,
         content_hash: Hash32,
@@ -112,6 +139,7 @@ pub mod testing {
     struct Rows {
         systems: Vec<SystemConfigSpec>,
         keys: Vec<KeyBindingSpec>,
+        prompts: std::collections::HashMap<Hash32, Vec<u8>>,
         generation: u64,
         published: Option<(u64, Hash32)>,
     }
@@ -131,6 +159,18 @@ pub mod testing {
 
         pub fn edit(&self, f: impl FnOnce(&mut Vec<SystemConfigSpec>)) {
             f(&mut self.rows.lock().unwrap().systems);
+        }
+
+        /// Store a body under its own content hash, which is the only way a
+        /// prompt is ever addressed.
+        pub fn put_prompt(&self, body: &[u8]) -> Hash32 {
+            let hash = ancre_canon::hash_bytes(body);
+            self.rows
+                .lock()
+                .unwrap()
+                .prompts
+                .insert(hash, body.to_vec());
+            hash
         }
 
         pub fn kill(&self) {
@@ -164,6 +204,11 @@ pub mod testing {
             let mut keys = self.rows.lock().unwrap().keys.clone();
             keys.reverse();
             Ok(keys)
+        }
+
+        async fn prompt(&self, hash: Hash32) -> Result<Option<Vec<u8>>, ControlError> {
+            self.check()?;
+            Ok(self.rows.lock().unwrap().prompts.get(&hash).cloned())
         }
 
         async fn published(&self) -> Result<Option<(u64, Hash32)>, ControlError> {
