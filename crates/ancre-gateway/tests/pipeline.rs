@@ -14,7 +14,7 @@ use ancre_provider::ProviderKind;
 use ancre_resolver::{PinResolver, StalenessPolicy, testing};
 use ancre_types::{EmittedEvent, Outcome, RiskFlag};
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full, StreamBody};
+use http_body_util::{BodyExt, Full};
 use hyper::{Request, Response, StatusCode};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -30,6 +30,9 @@ type Chunks = Vec<Bytes>;
 struct FakeUpstream {
     status: StatusCode,
     chunks: Chunks,
+    /// Signal end-of-stream on the last frame rather than with a following
+    /// `None`. What hyper does; see `FakeBody`.
+    end_on_last: bool,
     seen: Arc<Mutex<Vec<(ProviderKind, Bytes)>>>,
 }
 
@@ -38,6 +41,7 @@ impl FakeUpstream {
         Self {
             status: StatusCode::OK,
             chunks: vec![Bytes::from(body.to_string())],
+            end_on_last: false,
             seen: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -51,12 +55,19 @@ impl FakeUpstream {
                 .iter()
                 .map(|f| Bytes::from(format!("data: {f}\n\n")))
                 .collect(),
+            end_on_last: false,
             seen: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     fn with_status(mut self, status: StatusCode) -> Self {
         self.status = status;
+        self
+    }
+
+    /// Behave the way a real Content-Length response does.
+    fn ending_on_the_last_frame(mut self) -> Self {
+        self.end_on_last = true;
         self
     }
 
@@ -69,11 +80,35 @@ impl FakeUpstream {
     }
 }
 
-type UpstreamBody = StreamBody<
-    futures_util::stream::Iter<
-        std::vec::IntoIter<Result<http_body::Frame<Bytes>, std::convert::Infallible>>,
-    >,
->;
+/// The response body a fake upstream hands back.
+///
+/// Hand-written rather than a `StreamBody`, because the thing worth varying is
+/// exactly what `StreamBody` cannot express: whether end-of-stream arrives as
+/// a following `None` or as a flag on the last frame. Hyper's `Incoming` does
+/// the latter for a Content-Length response and then stops polling, and a body
+/// that only ever sees the first shape hides a whole class of bug.
+struct FakeBody {
+    chunks: std::vec::IntoIter<Bytes>,
+    end_on_last: bool,
+}
+
+impl http_body::Body for FakeBody {
+    type Data = Bytes;
+    type Error = std::convert::Infallible;
+
+    fn poll_frame(
+        mut self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<Bytes>, Self::Error>>> {
+        std::task::Poll::Ready(self.chunks.next().map(|c| Ok(http_body::Frame::data(c))))
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.end_on_last && self.chunks.len() == 0
+    }
+}
+
+type UpstreamBody = FakeBody;
 
 impl Upstream for FakeUpstream {
     type Body = UpstreamBody;
@@ -84,14 +119,10 @@ impl Upstream for FakeUpstream {
         req: Request<Bytes>,
     ) -> Result<Response<Self::Body>, BoxError> {
         self.seen.lock().unwrap().push((provider, req.into_body()));
-        let frames: Vec<Result<http_body::Frame<Bytes>, std::convert::Infallible>> = self
-            .chunks
-            .iter()
-            .map(|c| Ok(http_body::Frame::data(c.clone())))
-            .collect();
-        Ok(Response::builder()
-            .status(self.status)
-            .body(StreamBody::new(futures_util::stream::iter(frames)))?)
+        Ok(Response::builder().status(self.status).body(FakeBody {
+            chunks: self.chunks.clone().into_iter(),
+            end_on_last: self.end_on_last,
+        })?)
     }
 }
 
@@ -168,6 +199,38 @@ impl Harness {
         (status, events)
     }
 
+    /// Drive a request the way hyper drives a complete response: take exactly
+    /// the frames the body has and then stop — **without** the extra poll that
+    /// would return `None`.
+    ///
+    /// That last poll is the one a real server does not make once it knows the
+    /// body is done, and every fake that loops on `.collect()` makes it. The
+    /// difference is the whole bug this reproduces.
+    async fn run_taking_exactly(
+        self,
+        frames: usize,
+        req: Request<Full<Bytes>>,
+    ) -> Vec<EmittedEvent> {
+        let response = handle(&self.state, req)
+            .await
+            .expect("the pipeline must not fail");
+        let mut body = response.into_body();
+
+        for _ in 0..frames {
+            assert!(
+                std::pin::Pin::new(&mut body).frame().await.is_some(),
+                "the body owed another frame"
+            );
+        }
+        drop(body);
+
+        drop(self.state);
+        drop(self.fork);
+        self.batcher.run().await;
+
+        self.collector.events.lock().unwrap().clone()
+    }
+
     /// Drive a request and abandon the response part-way, the way a client
     /// that hangs up mid-stream does.
     async fn run_abandoned(self, req: Request<Full<Bytes>>) -> Vec<EmittedEvent> {
@@ -205,6 +268,35 @@ const CHAT_STREAM: &str =
 // ---------------------------------------------------------------------------
 // The happy path
 // ---------------------------------------------------------------------------
+
+/// The bug this test exists for, found by running the real binary and not by
+/// any fake: hyper stops polling a Content-Length body once its last byte is
+/// written, so `poll_frame` never returns `None` and the tap would only ever
+/// `finish` from `Drop` — the client-hung-up path. Every ordinary completion
+/// was recorded as `interrupted`, on a 200.
+///
+/// An event whose outcome contradicts its own status code is worse than a
+/// missing event: it is evidence that reads as an incident that never
+/// happened.
+#[tokio::test]
+async fn a_response_that_ends_on_its_last_frame_is_recorded_as_ok() {
+    let up = FakeUpstream::json(
+        r#"{"id":"chatcmpl-1","model":"gpt-4o-2024-08-06",
+            "usage":{"prompt_tokens":9,"completion_tokens":2}}"#,
+    )
+    .ending_on_the_last_frame();
+
+    let events = harness(up)
+        .run_taking_exactly(1, request("key-high", CHAT))
+        .await;
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].outcome, Outcome::Ok);
+    assert_eq!(events[0].metrics.http_status, 200);
+    // The pins still come off the body that was observed on the way past.
+    assert_eq!(&*events[0].pins.model_version, "gpt-4o-2024-08-06");
+    assert_eq!(events[0].metrics.tokens_in, 9);
+}
 
 #[tokio::test]
 async fn a_completion_produces_exactly_one_pinned_audit_event() {

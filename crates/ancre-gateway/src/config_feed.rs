@@ -128,7 +128,7 @@ impl<S: SnapshotSource> ConfigFeed<S> {
     }
 
     /// The backstop loop. Runs until `shutdown` resolves.
-    pub async fn run(self, interval: Duration, shutdown: impl Future<Output = ()> + Send) {
+    pub async fn run(&self, interval: Duration, shutdown: impl Future<Output = ()> + Send) {
         let mut ticker = tokio::time::interval(interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         tokio::pin!(shutdown);

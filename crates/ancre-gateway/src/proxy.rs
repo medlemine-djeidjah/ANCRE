@@ -219,6 +219,28 @@ where
             }
         }
     }
+
+    /// Forwarded, not defaulted.
+    ///
+    /// The default is `false`, which tells the server "there may be more" for
+    /// a body that is already complete — so it frames the response as chunked
+    /// and polls once more to find out. Passing the upstream's own answer
+    /// through lets a Content-Length response stay one, which is what the
+    /// client asked the provider for.
+    fn is_end_stream(&self) -> bool {
+        match self {
+            Self::Tapped(inner) => inner.is_end_stream(),
+            Self::Fixed(bytes) => bytes.is_none(),
+        }
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        match self {
+            Self::Tapped(inner) => inner.size_hint(),
+            Self::Fixed(Some(b)) => http_body::SizeHint::with_exact(b.len() as u64),
+            Self::Fixed(None) => http_body::SizeHint::with_exact(0),
+        }
+    }
 }
 
 /// A refusal the gateway generated itself.

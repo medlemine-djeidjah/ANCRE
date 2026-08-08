@@ -210,6 +210,17 @@ where
                 if let Some(data) = frame.data_ref() {
                     me.observe(data);
                 }
+                // End of stream can arrive as a flag on the last frame rather
+                // than as a following `None`, and hyper takes that shortcut:
+                // once a Content-Length body has yielded its last byte, the
+                // server writes the response and never polls again. Without
+                // this, every non-streaming request would be recorded as
+                // `interrupted` — the body would only ever `finish` from
+                // `Drop`, which is the "client hung up" path. A 200 logged as
+                // an interruption is evidence that contradicts itself.
+                if me.inner.is_end_stream() {
+                    me.finish();
+                }
                 Poll::Ready(Some(Ok(frame)))
             }
             Poll::Ready(Some(Err(e))) => {

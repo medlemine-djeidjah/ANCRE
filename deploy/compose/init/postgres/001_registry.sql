@@ -68,8 +68,14 @@ CREATE TABLE IF NOT EXISTS prompts (
   body        bytea NOT NULL
 );
 
--- `sha256(api_key)`. The key itself is never stored — a registry dump must not
--- be a list of working credentials.
+-- The hash of an API key, never the key — a registry dump must not be a list of
+-- working credentials.
+--
+-- It is the *workspace hash primitive*: BLAKE3 by default, SHA-256 under the
+-- `hash-sha256` feature. Not `sha256sum` from a shell, and the two do not
+-- agree, so a hand-computed hash produces a key that authenticates nothing.
+-- `cargo run -p ancre-gateway --example key-hash -- <key>` calls the same
+-- function the gateway calls, which is the only way to be sure it matches.
 CREATE TABLE IF NOT EXISTS api_keys (
   key_hash   bytea PRIMARY KEY CHECK (octet_length(key_hash) = 32),
   tenant_id  text  NOT NULL,

@@ -29,6 +29,13 @@ pub const SUBJECT_ROOT: &str = "ancre.events";
 /// `ConsumerConfig::filter_subject` for how that grows to several.
 pub const CONSUMER: &str = "ancre-ingester";
 
+/// How often `run` offers the writers a chance to emit a daily heartbeat.
+///
+/// The event is deterministic per (chain, day), so this only has to be small
+/// relative to a day. Hourly means a heartbeat lands within an hour of
+/// midnight, and it means an ingester restarted at 23:59 still marks that day.
+const HEARTBEAT_TICK: Duration = Duration::from_secs(3600);
+
 #[derive(Debug, Clone)]
 pub struct ConsumerConfig {
     /// Durable consumer name. Its position survives a restart, which is what
@@ -220,13 +227,37 @@ impl<S: EventStore> NatsConsumer<S> {
     }
 
     /// Pull until `shutdown` resolves.
+    ///
+    /// The heartbeat runs on this loop rather than on a task of its own, and
+    /// that is a correctness requirement rather than a convenience: one writer
+    /// per chain is what keeps a chain from forking, so the only thing allowed
+    /// to append to a chain is whatever owns its `ChainWriter` — which is this
+    /// consumer. A heartbeat is an append like any other.
     pub async fn run(mut self, shutdown: impl Future<Output = ()> + Send) -> ConsumeReport {
         let mut total = ConsumeReport::default();
         tokio::pin!(shutdown);
 
+        // Hourly, for an event that is deterministic per (chain, day): the tick
+        // only has to fall inside the day it stamps, and ticking more often
+        // than that is a no-op the writer refuses on its own.
+        let mut heartbeat = tokio::time::interval(HEARTBEAT_TICK);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
         loop {
             tokio::select! {
                 () = &mut shutdown => return total,
+                _ = heartbeat.tick() => {
+                    match self.ingester.heartbeats(ancre_types::Timestamp::now()).await {
+                        Ok(0) => {}
+                        Ok(written) => tracing::info!(chains = written, "heartbeats written"),
+                        // Not fatal and not deferred: a heartbeat that fails to
+                        // store leaves the day unmarked, and the next tick
+                        // inside the same day writes it. Nothing was chained
+                        // that is not stored, because `heartbeats` inserts
+                        // before it reports.
+                        Err(e) => tracing::warn!(error = %e, "heartbeat write failed"),
+                    }
+                }
                 result = self.pull_once() => match result {
                     Ok(r) => {
                         total.batches += r.batches;

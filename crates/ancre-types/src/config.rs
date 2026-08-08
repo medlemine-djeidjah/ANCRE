@@ -40,7 +40,11 @@ pub struct ConfigSnapshot {
     pub gateway_version: Arc<str>,
 
     pub(crate) systems: HashMap<Arc<str>, Arc<SystemConfig>>,
-    /// `sha256(api_key)` → binding. Hashed at auth, before resolution.
+    /// Hash of the API key → binding. Hashed at auth, before resolution.
+    ///
+    /// The workspace primitive, so BLAKE3 by default and SHA-256 under
+    /// `hash-sha256` — `ancre_gateway::auth::key_hash` is the one place that
+    /// decides it, and whatever populates the registry has to agree with it.
     pub(crate) keys: HashMap<Hash32, Arc<KeyBinding>>,
 }
 
