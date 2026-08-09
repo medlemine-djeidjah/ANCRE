@@ -162,6 +162,34 @@ pub trait Provider: Send + Sync {
     /// content token — the pin must be captured either way without holding a
     /// byte back from the client.
     fn served_by_streaming(&self, frame: &sse::Frame<'_>) -> Option<ServedBy>;
+
+    /// Where this provider serves the ingress path.
+    ///
+    /// Ingress is always the OpenAI wire, because that is the whole adoption
+    /// story — a customer changes a base URL and nothing else. Providers that
+    /// serve the same operation somewhere else have to say so here, or the
+    /// gateway posts a translated body to a path that does not exist and the
+    /// customer sees a 404 they cannot explain.
+    fn upstream_path<'a>(&self, ingress: &'a str) -> std::borrow::Cow<'a, str> {
+        std::borrow::Cow::Borrowed(ingress)
+    }
+
+    /// Headers the provider requires, given the deployment's credential.
+    ///
+    /// Here rather than in the gateway because how a provider is authenticated
+    /// is part of its wire contract — OpenAI takes a bearer token, Anthropic
+    /// takes `x-api-key` plus a version header — and a `match` on provider kind
+    /// inside the request path is where that knowledge goes to rot.
+    ///
+    /// `None` is a deployment with no credential configured for this provider,
+    /// which is legitimate: a self-hosted vLLM or a local mock needs none. The
+    /// request goes out unauthenticated and the provider's own 401 is recorded
+    /// as the outcome, which is a truer answer than a gateway-invented one.
+    fn upstream_headers(&self, credential: Option<&str>) -> Vec<(&'static str, String)> {
+        credential
+            .map(|c| vec![("authorization", format!("Bearer {c}"))])
+            .unwrap_or_default()
+    }
 }
 
 /// Does this identifier name specific weights, or a moving target?

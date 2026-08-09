@@ -41,6 +41,7 @@ use hyper_util::rt::TokioIo;
 const PINNED: &[(&str, &str)] = &[
     ("gpt-4o", "gpt-4o-2024-08-06"),
     ("gpt-4o-mini", "gpt-4o-mini-2024-07-18"),
+    ("claude-sonnet-4-5", "claude-sonnet-4-5-20250929"),
 ];
 
 type BoxBody = http_body_util::combinators::BoxBody<Bytes, Infallible>;
@@ -73,14 +74,19 @@ async fn handle(req: Request<hyper::body::Incoming>) -> Result<Response<BoxBody>
         .map(http_body_util::Collected::to_bytes)
         .unwrap_or_default();
 
-    // `/v1/messages` is Anthropic's path. Answering it with the OpenAI shape
-    // would be a lie the gateway then records, so it is refused rather than
-    // guessed at — the seeded demo routes to OpenAI, and a request that ends
-    // up here is a misconfiguration worth seeing.
+    // Anthropic's path, which the gateway must have rewritten on the way here.
+    // Serving it with the Anthropic response shape is what makes the demo
+    // prove the rewrite: if the gateway posted an Anthropic body to
+    // `/v1/chat/completions` — the bug that shipped through all of M5 — this
+    // arm would never be reached and the OpenAI arm would fail to parse it.
+    if path.ends_with("/v1/messages") {
+        return Ok(anthropic(&body));
+    }
+
     if !path.ends_with("/chat/completions") {
         return Ok(json(
             404,
-            r#"{"error":{"message":"mock provider serves /v1/chat/completions only","type":"mock"}}"#
+            r#"{"error":{"message":"mock provider serves /v1/chat/completions and /v1/messages","type":"mock"}}"#
                 .to_string(),
         ));
     }
@@ -104,6 +110,46 @@ async fn handle(req: Request<hyper::body::Incoming>) -> Result<Response<BoxBody>
     } else {
         json(200, completion(&served))
     })
+}
+
+/// Anthropic's response shape, which is a different document from OpenAI's —
+/// different usage field names, content as a list of blocks. The adapter reads
+/// `model` and `usage.{input,output}_tokens` from it, so a demo that answered
+/// with the OpenAI shape here would record `unknown` pins and look like a bug
+/// in the provider rather than in the mock.
+///
+/// Streaming is not implemented: Anthropic's SSE is its own event vocabulary,
+/// and a half-right imitation would teach the demo's reader something false.
+/// A streamed request gets an honest 400.
+fn anthropic(body: &[u8]) -> Response<BoxBody> {
+    let requested = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("model")?.as_str().map(ToString::to_string))
+        .unwrap_or_else(|| "claude-sonnet-4-5".to_string());
+
+    if serde_json::from_slice::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("stream").and_then(serde_json::Value::as_bool))
+        .unwrap_or(false)
+    {
+        return json(
+            400,
+            r#"{"type":"error","error":{"type":"invalid_request_error","message":"the mock provider does not imitate Anthropic's streaming vocabulary"}}"#
+                .to_string(),
+        );
+    }
+
+    let served = PINNED
+        .iter()
+        .find(|(alias, _)| *alias == requested)
+        .map_or(requested, |(_, pinned)| (*pinned).to_string());
+
+    json(
+        200,
+        format!(
+            r#"{{"id":"msg_mock","type":"message","role":"assistant","model":"{served}","content":[{{"type":"text","text":"This candidate's CV lists the two certifications the role requires."}}],"stop_reason":"end_turn","usage":{{"input_tokens":214,"output_tokens":18}}}}"#
+        ),
+    )
 }
 
 fn completion(model: &str) -> String {

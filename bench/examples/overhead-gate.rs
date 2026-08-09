@@ -27,7 +27,6 @@ use ancre_bench::{Percentiles, check};
 use ancre_gateway::proxy::{GatewayState, handle};
 use ancre_gateway::telemetry::{BatchConfig, Batcher, EventSink, SinkError, TelemetryFork};
 use ancre_gateway::upstream::Upstream;
-use ancre_provider::ProviderKind;
 use ancre_resolver::{PinResolver, StalenessPolicy, testing};
 use ancre_types::EmittedEvent;
 use bytes::Bytes;
@@ -55,7 +54,7 @@ impl Upstream for FakeUpstream {
 
     async fn send(
         &self,
-        _provider: ProviderKind,
+        _provider: &'static dyn ancre_provider::Provider,
         _req: Request<Bytes>,
     ) -> Result<Response<Self::Body>, BoxError> {
         Ok(Response::builder()

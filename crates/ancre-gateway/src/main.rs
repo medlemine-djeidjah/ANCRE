@@ -92,7 +92,7 @@ async fn main() -> Result<(), Fatal> {
     let state = Arc::new(GatewayState {
         resolver,
         telemetry: fork,
-        upstream: HttpsUpstream::new(endpoints())?,
+        upstream: HttpsUpstream::new_with_credentials(endpoints(), credentials())?,
         node_id: node_id.into(),
         pinning_enabled: true,
     });
@@ -187,6 +187,44 @@ fn endpoints() -> Endpoints {
         );
     }
     endpoints
+}
+
+/// The deployment's provider credentials.
+///
+/// From the environment and never from the request. The caller presents a
+/// virtual key that names a system in the registry; forwarding a
+/// caller-supplied provider credential would make this a proxy for whoever
+/// asked rather than for the customer who deployed it, and would put a
+/// credential nobody in the customer's organisation issued on the outbound
+/// side of their audit boundary.
+///
+/// An unset credential is not fatal. A self-hosted vLLM or a local mock needs
+/// none, and refusing to boot would make the quickstart impossible — but a
+/// deployment pointed at a real provider with nothing to authenticate with
+/// gets 401s on every request, so the state is logged loudly at startup where
+/// it is cheap to notice.
+fn credentials() -> ancre_gateway::upstream::Credentials {
+    let creds = ancre_gateway::upstream::Credentials {
+        openai: std::env::var("ANCRE_OPENAI_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty()),
+        anthropic: std::env::var("ANCRE_ANTHROPIC_API_KEY")
+            .ok()
+            .filter(|k| !k.is_empty()),
+    };
+
+    let configured = creds.configured();
+    if configured.is_empty() {
+        tracing::warn!(
+            "no provider credentials configured. Every upstream call will go out \
+             unauthenticated, which is correct for a mock or a self-hosted model \
+             and is a 401 from anybody else. Set ANCRE_OPENAI_API_KEY / \
+             ANCRE_ANTHROPIC_API_KEY"
+        );
+    } else {
+        tracing::info!(providers = ?configured, "provider credentials loaded");
+    }
+    creds
 }
 
 /// Fail closed on stale config for High-risk systems, defaulted **on**.

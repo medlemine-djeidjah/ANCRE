@@ -7,8 +7,9 @@
 # What it does, in order:
 #
 #   1. builds and starts six containers, seeded with one tenant and one system
-#   2. sends traffic through the gateway — a plain request, a streamed one, an
-#      overridden pin, and one the provider answers with a floating alias
+#   2. sends traffic through the gateway — plain and streamed, one routed to
+#      Anthropic instead of OpenAI, one with an overridden pin, and one the
+#      provider answers with a floating alias
 #   3. waits for the ingester to chain those events and the control plane to
 #      sign a checkpoint over them
 #   4. exports an evidence pack and verifies it offline, in a container with no
@@ -51,6 +52,7 @@ export ANCRE_BUILD_SHA
 # The demo's provider, so nobody needs an OpenAI account to watch a chain get
 # built. `mock-provider` is only reachable inside the compose network.
 export ANCRE_OPENAI_BASE=http://mock-provider:9090
+export ANCRE_ANTHROPIC_BASE=http://mock-provider:9090
 
 # A checkpoint every 20 events or 30 seconds, rather than the shipped default
 # of 10 000 or 5 minutes. This is the one setting the quickstart changes purely
@@ -101,6 +103,13 @@ done
 ask "a streamed one — tokens forwarded as they arrive" \
   '{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"Summarise this CV."}]}'
 
+# Same client, same OpenAI-wire request, a different provider. The gateway
+# translates the body, rewrites the path to Anthropic's `/v1/messages`, and
+# reads the pin back out of a response document with entirely different field
+# names. The caller changed one string.
+ask "the same request, routed to Anthropic instead" \
+  '{"model":"claude-sonnet-4-5","messages":[{"role":"user","content":"Summarise this CV."}]}'
+
 # The provider will answer with the floating alias it was asked for, because
 # the mock only resolves ids it actually knows. That is the honest case and it
 # is in the demo on purpose: the event records `unresolved:gpt-4o-preview` and
@@ -128,11 +137,11 @@ for i in $(seq 1 60); do
   events=$(head_seq); events=${events:-0}
   signed=$(signed_count); signed=${signed:-0}
   printf '\r   %s events chained, %s checkpoint(s) signed (%ss)' "$events" "$signed" "$i"
-  [ "$events" -ge 8 ] && [ "$signed" -ge 1 ] && break
+  [ "$events" -ge 9 ] && [ "$signed" -ge 1 ] && break
   sleep 1
 done
 printf '\n'
-events=$(head_seq); [ "${events:-0}" -ge 8 ] || die "the chain is short: the ingester is not keeping up. 'docker compose logs ingester'."
+events=$(head_seq); [ "${events:-0}" -ge 9 ] || die "the chain is short: the ingester is not keeping up. 'docker compose logs ingester'."
 
 say "Building an evidence pack"
 

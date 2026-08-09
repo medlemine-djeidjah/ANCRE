@@ -15,16 +15,19 @@
 --   cargo run -p ancre-gateway --example key-hash -- ancre-demo-key
 --   cargo run -p ancre-gateway --example key-hash -- "$(cat the prompt body)"
 --
--- `crates/ancre-control/tests/seed.rs` asserts that what is written here still
+-- `crates/ancre-gateway/tests/seed.rs` asserts that what is written here still
 -- matches what that function returns. A seed whose key hash has silently
 -- drifted authenticates nothing, and the symptom is a 401 ten minutes into
 -- somebody's first evaluation.
 --
 -- ## Idempotent
 --
--- The Postgres entrypoint only runs this on an empty data directory, but
--- `deploy/compose/quickstart.sh --reseed` runs it again against a live
--- database. Every statement below tolerates being re-run.
+-- The Postgres entrypoint only runs this on an empty data directory, so
+-- re-seeding a running deployment means piping this file into `psql` by hand.
+-- Every statement below tolerates being re-run, which is what makes that safe:
+--
+--   docker compose exec -T postgres psql -U ancre -d ancre \
+--     < deploy/compose/init/postgres/002_seed.sql
 
 -- The prompt body, addressed by its own content hash. Stored so that
 -- `GET /v1/prompts/{hash}` can show an auditor the text an event pinned —
@@ -43,7 +46,7 @@ INSERT INTO prompts (prompt_hash, body) VALUES (
 -- configuration (`ANCRE_FAIL_CLOSED_ON_STALE`).
 INSERT INTO systems (system_id, system_version, ifu_version, risk_class,
                      policy_id, policy_version, default_route, archived)
-VALUES ('hr-screening', '2.4.1', 'ifu-2026-03', 'high', 'none', 'none', 1, false)
+VALUES ('hr-screening', '2.4.1', 'ifu-2026-03', 'high', 'none', 'none', 2, false)
 ON CONFLICT (system_id) DO UPDATE SET
   system_version = EXCLUDED.system_version,
   ifu_version    = EXCLUDED.ifu_version,
@@ -51,10 +54,10 @@ ON CONFLICT (system_id) DO UPDATE SET
   default_route  = EXCLUDED.default_route,
   archived       = EXCLUDED.archived;
 
--- Two routes, and the order is the semantics: first match wins, so the
+-- Three routes, and the order is the semantics: first match wins, so every
 -- specific matcher has to come before `Any` or it can never fire. That is why
--- `default_route` above is 1 and not 0 — it indexes routes in position order,
--- and the catch-all is the second of the two.
+-- `default_route` above is 2 and not 0 — it indexes routes in position order,
+-- and the catch-all is the last of the three.
 --
 -- The second route exists to make the *unhappy* pin visible. The registry
 -- pins `gpt-4o-preview-2025-01-01`, the mock provider answers with the
@@ -69,7 +72,16 @@ VALUES
    'gpt-4o-preview', 'gpt-4o-preview-2025-01-01',
    'cv-screen', 'b3:6a4913393d54',
    decode('6a4913393d5480619887cbb83ed4d49296cdeb23b94aacfb4618fbb5597fd7a6', 'hex')),
-  ('hr-screening', 1, '"Any"'::jsonb,
+  -- A second provider behind the same OpenAI-wire ingress. The client changes
+  -- one string in its request and nothing else: the gateway translates the
+  -- body, rewrites the path to Anthropic's `/v1/messages`, and authenticates
+  -- with the deployment's Anthropic key. That the route exists at all is the
+  -- demonstration — a customer's multi-provider policy becomes a registry row.
+  ('hr-screening', 1, '{"ModelAlias":"claude-sonnet-4-5"}'::jsonb,
+   'claude-sonnet-4-5', 'claude-sonnet-4-5-20250929',
+   'cv-screen', 'b3:6a4913393d54',
+   decode('6a4913393d5480619887cbb83ed4d49296cdeb23b94aacfb4618fbb5597fd7a6', 'hex')),
+  ('hr-screening', 2, '"Any"'::jsonb,
    'gpt-4o', 'gpt-4o-2024-08-06',
    'cv-screen', 'b3:6a4913393d54',
    decode('6a4913393d5480619887cbb83ed4d49296cdeb23b94aacfb4618fbb5597fd7a6', 'hex'))

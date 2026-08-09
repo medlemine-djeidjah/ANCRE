@@ -11,7 +11,8 @@ Two categories, and the distinction matters:
 
 Update this file in the same commit that creates or clears an entry.
 
-Last updated: end of M5. The MVP is complete.
+Last updated: end of M5, after the deployment and integration guides were
+written — which is how two of the entries below came to be found.
 
 The seam has moved again, and this time it moved off the critical path. Every
 milestone's done-when has been met: `docker compose up` brings up a seeded,
@@ -20,9 +21,17 @@ to a verified evidence pack without a question and without anybody's API key;
 and the last step of that script edits a row in ClickHouse and watches both the
 chain and the signature over it refuse it.
 
-What is left is listed below, and none of it blocks an install. The largest
-single item is that **CI has still never run** (D5) — there is no remote — so
-every claim in this repository is a claim about a 20-core dev machine.
+What is left is listed below, and none of it blocks an install. Two entries
+deserve reading before a production deployment rather than after: the read API
+is unauthenticated (D17), and dedupe is a bounded in-memory window (D10). The
+largest single item is that **CI has still never run** (D5) — there is no
+remote — so every claim in this repository is a claim about a 20-core dev
+machine.
+
+Writing `docs/deploy.md` and `docs/integrate.md` found two defects that every
+test in the workspace had missed, both hidden by the same fake. Documentation
+that walks a reader through a path nobody has walked is a test, and it is worth
+saying so where the next person will look.
 
 ---
 
@@ -52,8 +61,8 @@ Kept briefly so the history is readable; delete at the start of M6.
   so the three services cannot be built from three different commits; the
   verifier ships in the control image and in a `network_mode: none` container
   of its own, because an auditor is not required to own a Rust toolchain
-- ~~no seed data~~ — `002_seed.sql` ships one tenant, one High-risk system, two
-  routes and a demo key. `crates/ancre-gateway/tests/seed.rs` recomputes both
+- ~~no seed data~~ — `002_seed.sql` ships one tenant, one High-risk system,
+  three routes across two providers, and a demo key. `crates/ancre-gateway/tests/seed.rs` recomputes both
   of its hashes from the functions the gateway calls, so a drifted key hash
   fails a test instead of failing somebody's first evaluation with a 401
 - ~~`ANCRE_SIGNING_KEY_PATH` pointed at `/run/secrets/`~~ — the control plane
@@ -62,9 +71,9 @@ Kept briefly so the history is readable; delete at the start of M6.
   `down && up` keeps signing with the same key and the previous run's
   checkpoints keep verifying
 - ~~no quickstart~~ — `deploy/compose/quickstart.sh`: six containers, traffic
-  including a floating alias and an overridden pin, an evidence pack, an
-  offline verification, then a row edited directly in ClickHouse and a second
-  verification that fails with exit code 1
+  including a request routed to Anthropic, a floating alias and an overridden
+  pin, an evidence pack, an offline verification, then a row edited directly in
+  ClickHouse and a second verification that fails with exit code 1
 - ~~E6 `telemetry.dropped` is never emitted~~ — the batcher emits it, because
   the batcher is the only thing that knows when the bus came back. Drops are
   counted **per chain**, keyed on the event handed back by the full channel: a
@@ -86,6 +95,23 @@ Kept briefly so the history is readable; delete at the start of M6.
   chain gaps, if the drops go unrecorded, or if the gateway *keeps* serving
   where it must fail closed. `bench`'s in-memory gate stays: it is fast, it
   runs on a laptop with no Docker, and the two check different things
+- ~~the gateway sent no provider credential at all~~ — found while writing the
+  deployment guide, which is a bad way to find it. `upstream.rs` stripped the
+  caller's `Authorization` with a comment claiming "the connector adds the real
+  provider credential"; nothing did. Every request to a real provider would
+  have been a 401, and the demo hid it because a mock ignores auth. The
+  deployment's own key now comes from `ANCRE_OPENAI_API_KEY` /
+  `ANCRE_ANTHROPIC_API_KEY`, is never read from a request, and never appears in
+  `Debug` output
+- ~~Anthropic requests went to OpenAI's path~~ — same discovery, same cause.
+  The upstream kept the caller's `/v1/chat/completions`, which does not exist
+  on `api.anthropic.com`, and sent no `anthropic-version` header, which
+  Anthropic rejects outright. `Provider` now owns both — where it serves the
+  ingress operation, and how it wants to be authenticated — because a `match`
+  on provider kind inside the request path is where that knowledge rots.
+  `crates/ancre-gateway/tests/upstream.rs` binds a real socket and asserts on
+  what arrives, which is the only kind of test that could have caught either:
+  both defects were invisible behind the fake upstream every other test uses
 - ~~a stable configuration went stale and failed closed~~ — **found by the
   first chaos run against real containers, forty seconds into a deployment
   with nothing wrong with it.** `poll_once` skipped the staleness clock when

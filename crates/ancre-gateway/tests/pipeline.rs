@@ -115,10 +115,13 @@ impl Upstream for FakeUpstream {
 
     async fn send(
         &self,
-        provider: ProviderKind,
+        provider: &'static dyn ancre_provider::Provider,
         req: Request<Bytes>,
     ) -> Result<Response<Self::Body>, BoxError> {
-        self.seen.lock().unwrap().push((provider, req.into_body()));
+        self.seen
+            .lock()
+            .unwrap()
+            .push((provider.kind(), req.into_body()));
         Ok(Response::builder().status(self.status).body(FakeBody {
             chunks: self.chunks.clone().into_iter(),
             end_on_last: self.end_on_last,

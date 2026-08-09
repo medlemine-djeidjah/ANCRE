@@ -55,9 +55,41 @@ struct AnthropicRequest {
     stop_sequences: Option<Value>,
 }
 
+/// The ingress operation, in OpenAI's spelling.
+const OPENAI_CHAT_PATH: &str = "/v1/chat/completions";
+/// The same operation, in Anthropic's.
+const ANTHROPIC_MESSAGES_PATH: &str = "/v1/messages";
+
+/// Anthropic requires this header on every request and rejects a request
+/// without it. Pinned rather than passed through: the customer's client speaks
+/// the OpenAI wire and has no reason to send it, and a version the gateway did
+/// not choose is a version nobody tested the translation against.
+const ANTHROPIC_VERSION: &str = "2023-06-01";
+
 impl Provider for Anthropic {
     fn kind(&self) -> ProviderKind {
         ProviderKind::Anthropic
+    }
+
+    /// `/v1/chat/completions` is the same operation Anthropic serves at
+    /// `/v1/messages`. Only that prefix is rewritten, and any query string
+    /// rides along untouched — a path this adapter does not recognise is
+    /// passed through rather than guessed at, so an unsupported operation
+    /// fails as the provider's own 404 instead of as a silent redirect to the
+    /// wrong endpoint.
+    fn upstream_path<'a>(&self, ingress: &'a str) -> std::borrow::Cow<'a, str> {
+        match ingress.strip_prefix(OPENAI_CHAT_PATH) {
+            Some(rest) => std::borrow::Cow::Owned(format!("{ANTHROPIC_MESSAGES_PATH}{rest}")),
+            None => std::borrow::Cow::Borrowed(ingress),
+        }
+    }
+
+    fn upstream_headers(&self, credential: Option<&str>) -> Vec<(&'static str, String)> {
+        let mut headers = vec![("anthropic-version", ANTHROPIC_VERSION.to_string())];
+        if let Some(c) = credential {
+            headers.push(("x-api-key", c.to_string()));
+        }
+        headers
     }
 
     /// OpenAI wire in, Anthropic wire out.
@@ -190,6 +222,78 @@ impl Provider for Anthropic {
             }),
             None => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod path_and_auth_tests {
+    use super::*;
+    use crate::openai::OpenAi;
+
+    /// The failure this exists to prevent: a translated Anthropic body POSTed
+    /// to `/v1/chat/completions` on `api.anthropic.com`, which 404s. The
+    /// gateway would have looked correct in every test that used a fake
+    /// upstream, and failed on the customer's first real request.
+    #[test]
+    fn the_chat_completions_path_becomes_the_messages_path() {
+        assert_eq!(
+            Anthropic.upstream_path("/v1/chat/completions"),
+            "/v1/messages"
+        );
+    }
+
+    #[test]
+    fn a_query_string_rides_along() {
+        assert_eq!(
+            Anthropic.upstream_path("/v1/chat/completions?trace=abc"),
+            "/v1/messages?trace=abc"
+        );
+    }
+
+    /// Passed through rather than guessed at. An operation this adapter does
+    /// not know how to translate should fail as the provider's own 404, not as
+    /// a silent redirect to an endpoint that will misinterpret it.
+    #[test]
+    fn an_unrecognised_path_is_left_alone() {
+        assert_eq!(Anthropic.upstream_path("/v1/embeddings"), "/v1/embeddings");
+    }
+
+    #[test]
+    fn openai_serves_the_ingress_path_unchanged() {
+        assert_eq!(
+            OpenAi.upstream_path("/v1/chat/completions"),
+            "/v1/chat/completions"
+        );
+    }
+
+    /// Each provider's own scheme. Anthropic rejects a request without
+    /// `anthropic-version`, so it is sent whether or not there is a credential.
+    #[test]
+    fn each_provider_authenticates_its_own_way() {
+        assert_eq!(
+            OpenAi.upstream_headers(Some("sk-test")),
+            vec![("authorization", "Bearer sk-test".to_string())]
+        );
+
+        let anthropic = Anthropic.upstream_headers(Some("sk-ant-test"));
+        assert!(anthropic.contains(&("x-api-key", "sk-ant-test".to_string())));
+        assert!(anthropic.iter().any(|(n, _)| *n == "anthropic-version"));
+        assert!(
+            !anthropic.iter().any(|(n, _)| *n == "authorization"),
+            "a bearer token means nothing to Anthropic and would be a leaked \
+             credential in a header it does not read"
+        );
+    }
+
+    /// A deployment with no credential — a mock, or a self-hosted model — must
+    /// still send the version header, and must not send an empty bearer.
+    #[test]
+    fn no_credential_sends_no_credential_header() {
+        assert!(OpenAi.upstream_headers(None).is_empty());
+
+        let anthropic = Anthropic.upstream_headers(None);
+        assert_eq!(anthropic.len(), 1);
+        assert_eq!(anthropic[0].0, "anthropic-version");
     }
 }
 

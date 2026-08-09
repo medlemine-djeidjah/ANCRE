@@ -45,6 +45,18 @@ services:
       # it at the mock, so that a demo needs nobody's API key.
       ANCRE_OPENAI_BASE: ${ANCRE_OPENAI_BASE:-https://api.openai.com}
       ANCRE_ANTHROPIC_BASE: ${ANCRE_ANTHROPIC_BASE:-https://api.anthropic.com}
+      # The deployment's own provider credentials, read from the environment
+      # that runs `docker compose` (put them in `deploy/compose/.env`, which is
+      # gitignored). They are never taken from a request: a caller presents a
+      # virtual key naming a system in the registry, and forwarding that
+      # upstream would make this a proxy for whoever asked rather than for the
+      # customer who deployed it.
+      #
+      # Unset is fine for the demo and for a self-hosted model behind an
+      # overridden base URL. Against a real provider it is a 401 on every
+      # request, and the gateway says so at startup.
+      ANCRE_OPENAI_API_KEY: ${ANCRE_OPENAI_API_KEY:-}
+      ANCRE_ANTHROPIC_API_KEY: ${ANCRE_ANTHROPIC_API_KEY:-}
     depends_on:
       control: { condition: service_healthy }
       nats: { condition: service_started }

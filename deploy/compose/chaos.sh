@@ -47,6 +47,7 @@ DEMO_KEY=ancre-demo-key
 STALENESS_BUDGET=${ANCRE_STALENESS_BUDGET_SECS:-30}
 
 export ANCRE_OPENAI_BASE=http://mock-provider:9090
+export ANCRE_ANTHROPIC_BASE=http://mock-provider:9090
 
 # Same demo cadence as the quickstart, so the pack this script verifies after
 # the store outage is actually attested rather than merely self-consistent.

@@ -169,7 +169,7 @@ where
     *upstream_req.method_mut() = method;
     *upstream_req.uri_mut() = uri;
     *upstream_req.headers_mut() = header_map;
-    let response = state.upstream.send(provider.kind(), upstream_req).await?;
+    let response = state.upstream.send(provider, upstream_req).await?;
     let (parts, upstream_body) = response.into_parts();
     let http_status = parts.status.as_u16();
 
