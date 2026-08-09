@@ -29,6 +29,7 @@
 //! cheaper of the two.
 
 fn main() {
+    ensure_ui_dist();
     println!("cargo:rerun-if-env-changed=ANCRE_BUILD_SHA");
     for path in ["../../.git/HEAD", "../../.git/index"] {
         if std::path::Path::new(path).exists() {
@@ -68,4 +69,28 @@ fn git_sha() -> Option<String> {
         .is_ok_and(|o| !o.stdout.is_empty());
 
     Some(if dirty { format!("{sha}.dirty") } else { sha })
+}
+
+/// Guarantee `ui/dist` exists before `rust_embed` reads it.
+///
+/// `#[derive(Embed)]` resolves its folder at compile time and fails the build
+/// if it is missing, and the directory is missing in three ordinary
+/// situations: a fresh clone (it holds only build output, so it is gitignored),
+/// a `cargo build` by someone who has never run `npm`, and — the one that
+/// actually bit — immediately after `vite build`, whose `emptyOutDir` deletes
+/// any placeholder committed to keep the directory alive.
+///
+/// A committed `.gitkeep` cannot survive that third case, so the invariant is
+/// established here instead of being asked of git. An empty directory embeds
+/// nothing and `ui.rs` answers with build instructions, which is the honest
+/// outcome for a binary built without a dashboard.
+fn ensure_ui_dist() {
+    let dist = std::path::Path::new("ui/dist");
+    if !dist.exists() {
+        // A failure here is not fatal: `rust_embed` will produce its own,
+        // clearer error, and a build that dies inside a directory-creation
+        // helper is harder to diagnose than one that dies where the folder is
+        // actually read.
+        let _ = std::fs::create_dir_all(dist);
+    }
 }

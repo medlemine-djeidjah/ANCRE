@@ -7,8 +7,9 @@
 # Written by deploy/compose/quickstart.sh
 deploy/compose/evidence/
 deploy/compose/.env
-crates/ancre-control/ui/dist/*
-!crates/ancre-control/ui/dist/.gitkeep
+# Build output. The directory itself is created by ancre-control/build.rs,
+# because vite wipes it and a committed placeholder cannot survive that.
+crates/ancre-control/ui/dist/
 
 # Anywhere, not just at the root — the dashboard lives inside a crate.
 node_modules/
