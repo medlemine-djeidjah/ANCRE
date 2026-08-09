@@ -112,16 +112,28 @@ impl<S: SnapshotSource> ConfigFeed<S> {
         })
     }
 
-    /// One poll: fetch and apply. A generation already installed is skipped
-    /// without a reload, so the backstop does not churn `loaded_at` — the
-    /// staleness clock must measure the config's age, not the poll loop's.
+    /// One poll: fetch, and apply if the generation moved.
+    ///
+    /// An already-installed generation is **confirmed** rather than reloaded.
+    /// The distinction matters in both directions:
+    ///
+    /// - no reload, so no diff, no `config.generation.applied` events, and no
+    ///   churn of the snapshot every request in flight is reading;
+    /// - the staleness clock restarts anyway, because a control plane that
+    ///   answers "still generation 41" has told this node that 41 is current.
+    ///   Without that, a fleet whose configuration is merely *stable* goes
+    ///   stale one budget after its last edit and starts refusing every
+    ///   High-risk request — which is what happened the first time the chaos
+    ///   pass ran against real containers.
     ///
     /// Note what a failed poll does *not* do: it does not clear the current
-    /// snapshot. The gateway keeps serving what it has until the budget runs
-    /// out, which is the whole point of the budget.
+    /// snapshot, and it does not touch the clock. The gateway keeps serving
+    /// what it has until the budget runs out, which is the whole point of the
+    /// budget.
     pub async fn poll_once(&self) -> Result<Option<Applied>, FeedError> {
         let envelope = self.source.fetch().await?;
         if envelope.generation == self.resolver.generation() && !self.resolver.is_cold() {
+            self.resolver.confirm_fresh();
             return Ok(None);
         }
         self.apply(envelope).map(Some)
@@ -346,6 +358,26 @@ mod tests {
         )
     }
 
+    /// A feed with a budget short enough to expire inside a test, and a handle
+    /// on the resolver so freshness can be observed from outside.
+    fn feed_with_budget(
+        spec: SnapshotSpec,
+        budget: std::time::Duration,
+    ) -> (ConfigFeed<Source>, Arc<PinResolver>) {
+        let (fork, _rx) = TelemetryFork::new(64);
+        let resolver = Arc::new(PinResolver::cold(
+            StalenessPolicy {
+                budget,
+                fail_closed_on_stale: true,
+            },
+            1 << 20,
+        ));
+        (
+            ConfigFeed::new(Source::new(spec), Arc::clone(&resolver), fork, "gw-1"),
+            resolver,
+        )
+    }
+
     #[tokio::test]
     async fn the_first_poll_installs_a_snapshot_and_leaves_cold_start() {
         let (feed, _rx) = feed(testing::spec(41));
@@ -371,6 +403,58 @@ mod tests {
 
         assert!(feed.poll_once().await.unwrap().is_none());
         assert!(feed.poll_once().await.unwrap().is_none());
+    }
+
+    /// A stable configuration must not go stale.
+    ///
+    /// The staleness budget bounds how long a node may serve under a
+    /// configuration that has been *superseded*. A control plane answering
+    /// "still generation 41" is evidence that 41 has not been superseded, so a
+    /// poll that changes nothing still restarts the clock.
+    ///
+    /// Without this, every healthy fleet fails closed on all High-risk traffic
+    /// one budget after its last configuration edit — which is exactly what
+    /// the first chaos run against real containers found, at 40 seconds into a
+    /// deployment with nothing wrong with it.
+    #[tokio::test]
+    async fn a_poll_that_changes_nothing_still_proves_the_config_is_current() {
+        let (feed, resolver) =
+            feed_with_budget(testing::spec(41), std::time::Duration::from_millis(30));
+
+        feed.poll_once().await.unwrap();
+        assert_eq!(resolver.freshness(), ancre_resolver::Freshness::Fresh);
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            resolver.freshness(),
+            ancre_resolver::Freshness::Stale,
+            "past the budget with no contact, this node is stale"
+        );
+
+        // The control plane is reachable and reports the same generation.
+        assert!(feed.poll_once().await.unwrap().is_none());
+        assert_eq!(
+            resolver.freshness(),
+            ancre_resolver::Freshness::Fresh,
+            "reaching the control plane is what refreshes staleness, not the \
+             configuration happening to change"
+        );
+    }
+
+    /// And the other direction, which is the one that matters more: a poll
+    /// that *fails* must not restart the clock. A budget that advances on
+    /// contact this node never made is not a budget.
+    #[tokio::test]
+    async fn a_failed_poll_leaves_the_node_going_stale() {
+        let (feed, resolver) =
+            feed_with_budget(testing::spec(41), std::time::Duration::from_millis(30));
+
+        feed.poll_once().await.unwrap();
+        feed.source.kill();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(feed.poll_once().await.is_err());
+        assert_eq!(resolver.freshness(), ancre_resolver::Freshness::Stale);
     }
 
     /// The bus is not trusted, and neither is the poll response.

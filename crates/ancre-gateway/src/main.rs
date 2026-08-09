@@ -55,7 +55,14 @@ async fn main() -> Result<(), Fatal> {
     let nats_url = env_or("ANCRE_NATS_URL", "nats://127.0.0.1:4222");
     let sink = Arc::new(ancre_gateway::bus::NatsSink::connect(&nats_url).await?);
     let (fork, rx) = TelemetryFork::new(65_536);
-    tokio::spawn(Batcher::new(rx, Arc::clone(&sink), BatchConfig::default()).run());
+    tokio::spawn(
+        Batcher::new(rx, Arc::clone(&sink), BatchConfig::default())
+            // The batcher is what emits `telemetry.dropped`, so it has to know
+            // which node lost the events. That is the first question an
+            // incident asks and the one a fleet-wide count cannot answer.
+            .with_node_id(node_id.clone())
+            .run(),
+    );
 
     let resolver = Arc::new(PinResolver::cold(staleness_policy(), 64 * 1024 * 1024));
 
@@ -68,6 +75,7 @@ async fn main() -> Result<(), Fatal> {
     ));
 
     cold_start(&feed, &control_url).await?;
+    report_build_agreement(&resolver.snapshot().gateway_version);
 
     // The fast path and the backstop, both running. Either alone converges;
     // together the common case is milliseconds and the worst case is one poll.
@@ -130,6 +138,34 @@ async fn cold_start<S: SnapshotSource>(feed: &ConfigFeed<S>, url: &str) -> Resul
         COLD_START_BUDGET.as_secs()
     )
     .into())
+}
+
+/// Say out loud whether the `gateway_version` pin will name this binary.
+///
+/// It cannot be made to, and that is structural rather than an oversight:
+/// every pin in an event has to be a value the control plane hashed into
+/// `config_hash`, so `gateway_version` travels in the snapshot. During a
+/// rolling deploy the control plane and this node are legitimately different
+/// builds, and for that window every event this node writes is pinned to the
+/// control plane's build and not its own.
+///
+/// That window is unavoidable. Being unable to tell afterwards that it
+/// happened is not — so the disagreement is logged at startup, where an
+/// incident review can find it, rather than left to be inferred from a
+/// deployment timeline nobody kept.
+fn report_build_agreement(snapshot_version: &str) {
+    if snapshot_version == ancre_gateway::GATEWAY_VERSION {
+        tracing::info!(build = snapshot_version, "gateway build");
+    } else {
+        tracing::warn!(
+            build = ancre_gateway::GATEWAY_VERSION,
+            pinned_as = snapshot_version,
+            "this node's build and the snapshot's gateway_version disagree: events \
+             written here will be pinned to the control plane's build, not this \
+             one. Expected mid-deploy; a permanent mismatch means the pin names \
+             the wrong code"
+        );
+    }
 }
 
 /// Where the providers live.

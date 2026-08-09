@@ -25,11 +25,14 @@ pub mod tap;
 pub mod telemetry;
 pub mod upstream;
 
-/// Build semver + git SHA. Stamped into every event as `gateway_version`, so
-/// it comes from the build, never from a config file a human can edit.
-pub const GATEWAY_VERSION: &str = concat!(
-    env!("CARGO_PKG_VERSION"),
-    "+",
-    // TODO(E4): set via build.rs from `git rev-parse --short HEAD`.
-    "unknown"
-);
+/// Build semver + git SHA, stamped by `build.rs` at compile time so it comes
+/// from the build and never from a config file a human can edit.
+///
+/// Note where this is *not* used: the `gateway_version` an event carries comes
+/// from the installed snapshot, because every pin in an event has to be a
+/// value the control plane hashed into `config_hash`. So this constant is what
+/// this binary believes about itself, and the snapshot's is what the fleet was
+/// told — `main` compares them at startup and says so when they differ. A
+/// mismatch is a half-finished deploy, and the cost of not noticing is a pin
+/// that names the wrong build.
+pub const GATEWAY_VERSION: &str = concat!(env!("CARGO_PKG_VERSION"), "+", env!("ANCRE_BUILD_SHA"));

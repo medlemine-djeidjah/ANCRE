@@ -3,17 +3,26 @@
 An LLM gateway that produces regulator-grade evidence as a side effect of
 serving traffic.
 
-**Status: M1–M4 complete; M5 in progress.**
+**Status: the MVP is complete. M1–M5 done.**
 
-The deterministic encoder, the hash chain, the offline verifier, the in-path
-pin resolver, the request pipeline, the ingester's chaining and the control
-plane's snapshot build and checkpoint signing are real and tested — 322 tests,
-both hash back-ends, both latency gates passing. Thirty-four of those run
-against a real ClickHouse, Postgres and NATS.
+```sh
+./deploy/compose/quickstart.sh
+```
 
-All three binaries run and talk to each other, and a chain can be exported and
-verified. What remains is packaging: there are no Dockerfiles, so none of it is
-one command yet. `docs/deferred.md` lists every gap, with what it costs.
+Six containers, no API key, and about ten minutes — most of which is compiling.
+It starts a seeded gateway, sends traffic through it, builds an evidence pack,
+verifies it in a container with no network interface, then edits one row
+directly in ClickHouse and verifies again. The second verification fails and
+names the event. That last step is the product; everything before it is setup.
+
+Under it: the deterministic encoder, the hash chain, the offline verifier, the
+in-path pin resolver, the request pipeline, the ingester's chaining, and the
+control plane's snapshot build and checkpoint signing — 342 tests, both hash
+back-ends, both latency gates passing. Thirty-four of those run against a real
+ClickHouse, Postgres and NATS.
+
+`docs/deferred.md` lists every remaining gap, with what it costs. Nothing in it
+blocks an install.
 
 ## Documents
 
@@ -39,7 +48,7 @@ crates/
   ancre-control/    [bin] axum, Postgres, snapshot build, checkpoint signer
   ancre-verify/     [bin] standalone offline verifier
 bench/              criterion, gating CI from week 3
-deploy/compose/     one-command self-host
+deploy/compose/     one-command self-host, and the quickstart
 ```
 
 Three deployable binaries plus a verifier — PRD §10 caps production at three
@@ -179,8 +188,9 @@ Design decisions worth knowing:
 
 ## The whole thing, end to end
 
-Three processes, three dependencies, one pipe. Traffic goes through the gateway;
-what comes out the other end is a chain anybody can check.
+Three processes, three dependencies, one pipe — `quickstart.sh` runs all of
+what follows. Traffic goes through the gateway; what comes out the other end is
+a chain anybody can check.
 
 ```sh
 curl -s localhost:8081/v1/chains/acme/hr-screening/events | ancre-verify --chain -
@@ -210,10 +220,57 @@ Append-only is enforced by the hash chain, not by the engine. That is the point
 of the chain: the store is not trusted, and neither is the person who runs it.
 
 The events are served as newline-delimited JSON, which is exactly what the
-verifier reads — no pack format, no manifest, nothing to get wrong between the
-two. Signed checkpoints come from `/v1/checkpoints/{tenant}/{system}` and the
-public keys from `/v1/pubkeys`, so verification needs the chain and one 32-byte
-key and no network at all.
+verifier reads — no new encoding to get wrong between the two. Signed
+checkpoints come from `/v1/checkpoints/{tenant}/{system}` and the public keys
+from `/v1/pubkeys`.
+
+## The evidence pack
+
+Those three responses plus a short manifest are an *evidence pack*, and
+`ancre-verify --pack` checks the whole thing offline:
+
+```sh
+docker compose --profile tools run --rm verify --pack /evidence/acme-hr-screening
+```
+
+```
+Pack: acme/hr-screening
+  produced 2026-08-09T07:16:26Z by ancre quickstart, build a77de9bbc5cc
+
+Chain verified: 8 events, seq 1–8, no violations.
+  range root: 4c1e…
+  chain head: 9d70…
+
+Checkpoints: 1 of 1 verified.
+  seq 1–8  root fde7ed1cb22ea8cb  signed by cp-ea3c03a599d0f1ce
+Attested range: seq 1–8.
+
+Signatures were checked against this pack's own keys. That proves the pack is
+internally consistent and says nothing about who made it — compare these
+fingerprints with the ones you were given separately, or re-run with --key:
+  cp-ea3c03a599d0f1ce  ea3c03a599d0f1ce…  (active since 2026-08-09T07:15:55Z)
+```
+
+Two verdicts, not one, because the two properties fail independently: the chain
+says the events are internally consistent, the checkpoints say a key signed
+them. **Attested range** is the number that matters — it is the span an
+auditor can rely on, and a hole between two signed ranges stays visible as a
+hole rather than being averaged into a percentage.
+
+Three things about that output are deliberate:
+
+- The verifier recomputes each event's hash rather than trusting the one the
+  file carries, so a checkpoint attests the events' *contents*. Feeding it the
+  recorded hashes would have made the signature attest an attacker's own
+  arithmetic — and in the tamper run above, that is why the signature check
+  fails on its own terms and not merely as an echo of the chain's verdict.
+- The circularity is printed, not hidden. A pack carries the keys that signed
+  it, so verifying against them proves consistency and nothing about
+  provenance. `--key <HEX>` pins a fingerprint obtained elsewhere, and then a
+  forged pack fails.
+- `network_mode: none` on that container. The claim is that verification needs
+  no network; a container with no network interface is the version of that
+  claim a sceptic cannot argue with.
 
 ## What M4 and M5 established
 
@@ -256,11 +313,62 @@ Each transport suite is a no-op without its `ANCRE_TEST_*` variable, so
 `cargo test` stays green without Docker. CI's `transports` job always sets
 them.
 
-## Next: finish M5, packaging
+## What M5 established
 
-Dockerfiles, a seeded `docker compose up`, and the two `main`s that still need
-writing. Done when someone who has never seen the repo gets a verified chain
-without asking a question.
+Packaging, which is the milestone whose done-when is about a person rather than
+a number: someone who has never seen the repo gets a verified chain without
+asking a question.
+
+- **One Dockerfile, not three.** A shared builder stage and five runtime stages
+  selected by `target:`. Three files would mean three independent builds of the
+  same workspace, and three chances for one service to be built from a
+  different commit than the two it talks to.
+- **The registry ships populated.** An empty registry publishes an empty
+  snapshot; the gateway installs it and refuses every key, so the first thing a
+  stranger would see is the product failing. Postgres is not reported healthy
+  until the seed has landed, which closes the same race during startup.
+- **The seeded hashes are checked by a test**, not typed and trusted. A key
+  hash that drifts from `auth::key_hash` authenticates nothing, and the symptom
+  would be a 401 ten minutes into somebody's first evaluation.
+- **The demo shows the unhappy pins too.** One request comes back with a
+  floating alias — recorded as `unresolved:gpt-4o-preview` with the
+  `unpinned_model` flag — and one carries a caller's pin override. An evidence
+  system that only ever demonstrates clean rows has not been demonstrated.
+- **`gateway_version` names a commit.** `build.rs` stamps it, `.dirty` when the
+  tree was not clean, and the gateway logs it at startup when its own build
+  disagrees with the snapshot's — which happens legitimately mid-deploy, and
+  should never happen silently.
+- **Dropped telemetry is an event, per chain.** The batcher emits
+  `telemetry.dropped` when the bus comes back, attributed to the chain that
+  lost the events, because a node-wide count could only be reported into one
+  arbitrary chain or into all of them as though each had lost everything.
+
+The whole of it is a CI job, and it fails if the tampered pack *passes*.
+
+### The chaos pass
+
+```sh
+./deploy/compose/chaos.sh
+```
+
+Three outages against the real containers, each with a claim that fails the
+script if it is false: the bus dies and the gateway keeps serving while the
+lost evidence is counted and later recorded; the store dies and the ingester
+defers rather than acking, then catches up with no gap; the control plane dies
+and the gateway serves from its installed snapshot until the staleness budget
+expires and then **refuses** High-risk traffic.
+
+The first run of this found a bug that no unit test could have. `poll_once`
+skipped the staleness clock when the control plane reported an unchanged
+generation, reasoning that the clock should measure the configuration's age. It
+should measure neither the configuration's age nor the poll loop's: the budget
+bounds how long a node may serve under a configuration that has been
+*superseded*, and a control plane answering "still generation 41" is evidence
+that it has not been. As written, every healthy fleet would have started
+refusing all High-risk traffic thirty seconds after its last config edit.
+
+That is the argument for killing real containers rather than fakes, and it is
+why the third check is written to fail if the gateway keeps serving.
 
 ## Build
 

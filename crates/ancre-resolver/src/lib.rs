@@ -171,6 +171,40 @@ impl PinResolver {
         outcome
     }
 
+    /// The control plane was reached and reported the generation this node
+    /// already has. Restart the staleness clock without swapping anything.
+    ///
+    /// This is not bookkeeping — it is what makes the staleness budget mean
+    /// what it is sold as. The budget bounds **how long a node can serve under
+    /// a configuration that has been superseded**, and a control plane that
+    /// answers "still generation 41" is positive evidence that 41 has *not*
+    /// been superseded. Treating the config's own age as staleness instead
+    /// means a fleet whose configuration is simply stable — which is every
+    /// healthy fleet, most of the time — fails closed on all High-risk traffic
+    /// one budget after its last edit.
+    ///
+    /// That is not hypothetical. It is what this code did until the M5 chaos
+    /// pass tried to serve traffic forty seconds after a quiet start-up and
+    /// got a 503 from a gateway whose control plane was perfectly healthy.
+    ///
+    /// A *failed* poll must not call this. The clock advancing on a fetch that
+    /// never reached the control plane would make the budget unbounded, which
+    /// is the failure this whole mechanism exists to prevent.
+    pub fn confirm_fresh(&self) {
+        let cur = self.current.load_full();
+        // Nothing to confirm about a node that has never loaded a snapshot:
+        // cold start fails closed for every risk class, and no amount of
+        // reachability changes that.
+        if cur.cold {
+            return;
+        }
+        self.current.store(Arc::new(Loaded {
+            snap: Arc::clone(&cur.snap),
+            loaded_at: Instant::now(),
+            cold: false,
+        }));
+    }
+
     #[must_use]
     pub fn generation(&self) -> u64 {
         self.current.load().snap.generation

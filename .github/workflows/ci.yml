@@ -97,6 +97,31 @@ jobs:
           cargo test -p ancre-control --test clickhouse -- --test-threads=1
           cargo test -p ancre-control --test bus -- --test-threads=1
 
+  # M5's done-when, as a job: a stranger clones the repo and gets a verified
+  # chain without asking a question.
+  #
+  # This is the only job that builds the container images, and the only one
+  # that exercises the three binaries against each other through the network
+  # they will actually run on. Everything the other jobs check is a property of
+  # the code; this checks the property the milestone was defined by, which is
+  # that the packaging works.
+  #
+  # `quickstart.sh` is a gate and not a demo script: it exits non-zero if the
+  # stack does not come up, if the chain comes back short, if the pack fails to
+  # verify — and, crucially, if the tampered pack *passes*. A verifier that
+  # stopped detecting tampering would leave every other job in this file green.
+  quickstart:
+    runs-on: ubuntu-latest
+    # The release build with fat LTO dominates this, and a cold runner has no
+    # cargo cache to reuse inside the image build.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./deploy/compose/quickstart.sh
+      - name: Container logs, if it failed
+        if: failure()
+        run: docker compose -f deploy/compose/compose.yaml --profile demo logs --tail=200
+
   # The latency claim is a product feature, so missing it fails the build.
   #
   # This checks the absolute targets in resolver spec §9 against raw

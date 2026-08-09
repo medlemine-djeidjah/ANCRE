@@ -72,6 +72,29 @@ impl Pins {
         }
     }
 
+    /// Every pin `unknown`, for an event that describes a **hole** rather than
+    /// a request.
+    ///
+    /// `telemetry.dropped` is the case: the events it accounts for are gone,
+    /// so their pins are gone with them, and there is nothing to reconstruct
+    /// them from. The system is named because the chain the event lands in
+    /// already names it; everything else is `unknown`, which makes `has_gap()`
+    /// true and puts the event in exactly the `GROUP BY` an auditor uses to
+    /// count what is missing (PRD §6.3).
+    ///
+    /// Separate from `null_baseline` on purpose. That one exists for a
+    /// benchmark build and must never be seen in production; this one is
+    /// production telling the truth about a gap, and conflating the two would
+    /// make the benchmark's pins indistinguishable from a real outage.
+    #[must_use]
+    pub fn gap(system_id: Arc<str>, flag: RiskFlag) -> Self {
+        Self {
+            system_id,
+            risk_flags: smallvec::smallvec![flag],
+            ..Self::null_baseline()
+        }
+    }
+
     /// True if any pin is `unknown` or an unresolved alias — i.e. this event
     /// cannot fully reconstruct the decision that produced it.
     ///

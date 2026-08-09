@@ -3,3 +3,6 @@
 .env
 *.pem
 *.key
+
+# Written by deploy/compose/quickstart.sh
+deploy/compose/evidence/

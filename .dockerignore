@@ -1,0 +1,13 @@
+# The build context is the repo root, and `target/` is several gigabytes of
+# host-built artefacts the image must never see — sending it costs minutes, and
+# a stale host artefact leaking into a container build is a class of bug that
+# takes a day to find.
+target/
+.git/
+.github/
+docs/
+deploy/
+bench/target/
+*.md
+chain.jsonl
+tampered.jsonl
