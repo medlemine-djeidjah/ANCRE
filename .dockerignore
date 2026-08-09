@@ -3,11 +3,15 @@
 # a stale host artefact leaking into a container build is a class of bug that
 # takes a day to find.
 target/
+crates/ancre-control/ui/node_modules/
+crates/ancre-control/ui/dist/
 .git/
 .github/
 docs/
 deploy/
 bench/target/
+crates/ancre-control/ui/node_modules/
+crates/ancre-control/ui/dist/
 *.md
 chain.jsonl
 tampered.jsonl

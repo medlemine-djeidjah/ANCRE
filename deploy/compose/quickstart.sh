@@ -64,6 +64,10 @@ export ANCRE_CHECKPOINT_EVERY_N=20
 export ANCRE_CHECKPOINT_EVERY_SECS=30
 export ANCRE_CHECKPOINT_INTERVAL_SECS=5
 
+# A known token, so the last line of this script can tell you how to log in.
+# A real deployment sets its own; an unset one is generated per process.
+export ANCRE_ADMIN_TOKEN=${ANCRE_ADMIN_TOKEN:-ancre-demo-operator}
+
 say() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 note() { printf '   %s\n' "$*"; }
 die() { printf '\n\033[1;31m!! %s\033[0m\n' "$*" >&2; exit 1; }
@@ -125,8 +129,10 @@ ask "one where the caller overrode a pin" \
 
 say "Waiting for the ingester to chain them, and the control plane to sign"
 
+AUTH=(-H "Authorization: Bearer $ANCRE_ADMIN_TOKEN")
+
 head_seq() {
-  curl -sS "$CONTROL/v1/chains/$TENANT/$SYSTEM/events" 2>/dev/null | grep -c . || true
+  curl -sS "${AUTH[@]}" "$CONTROL/v1/chains/$TENANT/$SYSTEM/events" 2>/dev/null | grep -c . || true
 }
 signed_count() {
   curl -sS "$CONTROL/v1/checkpoints/$TENANT/$SYSTEM" 2>/dev/null \
@@ -146,7 +152,7 @@ events=$(head_seq); [ "${events:-0}" -ge 9 ] || die "the chain is short: the ing
 say "Building an evidence pack"
 
 mkdir -p "$PACK_DIR"
-curl -sS "$CONTROL/v1/chains/$TENANT/$SYSTEM/events"   -o "$PACK_DIR/events.jsonl"
+curl -sS "${AUTH[@]}" "$CONTROL/v1/chains/$TENANT/$SYSTEM/events" -o "$PACK_DIR/events.jsonl"
 curl -sS "$CONTROL/v1/checkpoints/$TENANT/$SYSTEM"     -o "$PACK_DIR/checkpoints.json"
 curl -sS "$CONTROL/v1/pubkeys"                         -o "$PACK_DIR/pubkeys.json"
 
@@ -181,7 +187,7 @@ note "  ALTER TABLE ancre.audit_events UPDATE tokens_out = 999 WHERE seq = 3"
 compose exec -T clickhouse clickhouse-client --user ancre --password ancre \
   --query "ALTER TABLE ancre.audit_events UPDATE tokens_out = 999 WHERE seq = 3 AND system_id = '$SYSTEM' SETTINGS mutations_sync = 2"
 
-curl -sS "$CONTROL/v1/chains/$TENANT/$SYSTEM/events" -o "$PACK_DIR/events.jsonl"
+curl -sS "${AUTH[@]}" "$CONTROL/v1/chains/$TENANT/$SYSTEM/events" -o "$PACK_DIR/events.jsonl"
 
 set +e
 verify_pack "/evidence/${TENANT}-${SYSTEM}"
@@ -199,9 +205,13 @@ else
 fi
 
 say "Where to go next"
-note "The chain, as newline-delimited JSON:"
-note "  curl -s $CONTROL/v1/chains/$TENANT/$SYSTEM/events"
+note "The dashboard, in a browser:"
+note "  $CONTROL     token: $ANCRE_ADMIN_TOKEN"
+note ""
+note "The chain, as newline-delimited JSON (now needs the token):"
+note "  curl -s -H 'Authorization: Bearer $ANCRE_ADMIN_TOKEN' \\"
+note "    $CONTROL/v1/chains/$TENANT/$SYSTEM/events"
 note "The prompt every event pins, served by its own content hash:"
-note "  curl -s $CONTROL/v1/prompts/6a4913393d5480619887cbb83ed4d49296cdeb23b94aacfb4618fbb5597fd7a6"
+note "  curl -s -H 'Authorization: Bearer $ANCRE_ADMIN_TOKEN' $CONTROL/v1/prompts/6a4913393d5480619887cbb83ed4d49296cdeb23b94aacfb4618fbb5597fd7a6"
 note "Stop everything, keeping the data:      docker compose --profile demo down"
 note "Stop everything and delete the data:    docker compose --profile demo down -v"

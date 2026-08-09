@@ -50,6 +50,17 @@ pub struct ControlState<S, C, K, X> {
     pub chains: std::sync::Arc<X>,
 }
 
+/// Everything the router needs that is not a datastore.
+///
+/// Separate from `ControlState` so the protected and open route groups can
+/// share the datastores while only the protected group carries the credential
+/// — an accidental `.layer()` on the wrong group is then a compile error
+/// rather than a quietly public endpoint.
+#[derive(Clone, Debug)]
+pub struct Guard {
+    pub admin: crate::auth::Admin,
+}
+
 impl<S, C, K, X> std::fmt::Debug for ControlState<S, C, K, X> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ControlState").finish_non_exhaustive()
@@ -71,27 +82,133 @@ impl<S, C, K, X> std::fmt::Debug for ControlState<S, C, K, X> {
 /// audit trail of its own, and half of one is worse than none.
 pub fn router<S: SnapshotApi, C: CheckpointStore + 'static, K: KeyDirectory, X: Chains>(
     state: Arc<ControlState<S, C, K, X>>,
+    guard: Guard,
 ) -> Router {
-    Router::new()
-        .route("/healthz", get(|| async { "ok" }))
+    // Content. Everything here describes how a customer runs their AI, and
+    // none of it is needed to *verify* evidence somebody was already handed.
+    let protected = Router::new()
         .route("/v1/snapshot", get(snapshot::<S, C, K, X>))
         .route("/v1/prompts/{hash}", get(prompt::<S, C, K, X>))
+        .route("/v1/chains", get(chain_list::<S, C, K, X>))
         .route(
-            "/v1/checkpoints/{tenant}/{system}",
-            get(checkpoints::<S, C, K, X>),
+            "/v1/chains/{tenant}/{system}/summary",
+            get(chain_summary::<S, C, K, X>),
         )
         .route(
             "/v1/chains/{tenant}/{system}/events",
             get(events::<S, C, K, X>),
         )
+        .layer(axum::middleware::from_fn_with_state(
+            guard.admin.clone(),
+            crate::auth::require_admin,
+        ))
+        .with_state(Arc::clone(&state));
+
+    // Attestation, and liveness. A checkpoint is a signature over a root hash
+    // and a public key is a public key: neither reveals a customer's traffic,
+    // and an auditor who must obtain a credential before checking a signature
+    // is an auditor who checks fewer signatures.
+    let open = Router::new()
+        .route("/healthz", get(|| async { "ok" }))
+        .route(
+            "/v1/checkpoints/{tenant}/{system}",
+            get(checkpoints::<S, C, K, X>),
+        )
         .route("/v1/pubkeys", get(pubkeys::<S, C, K, X>))
-        .with_state(state)
+        .with_state(state);
+
+    // Session establishment has to be reachable without a session.
+    let session = Router::new()
+        .route(
+            "/api/session",
+            get(session_status)
+                .post(session_create)
+                .delete(session_delete),
+        )
+        .with_state(guard);
+
+    open.merge(protected)
+        .merge(session)
+        .merge(crate::ui::router())
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct SessionRequest {
+    pub token: String,
+}
+
+/// Whether this request carries a usable session.
+///
+/// The dashboard calls it on load to decide between the login screen and the
+/// application. It is deliberately not protected — an unauthenticated caller
+/// gets `{"authenticated": false}` rather than a 401, because a 401 here would
+/// make the login page itself look like an error.
+async fn session_status(
+    State(guard): State<Guard>,
+    headers: axum::http::HeaderMap,
+) -> Json<serde_json::Value> {
+    let ok = crate::auth::presented_token(&headers).is_some_and(|t| guard.admin.admits(&t));
+    Json(serde_json::json!({ "authenticated": ok }))
+}
+
+/// Exchange the operator token for a session cookie.
+async fn session_create(State(guard): State<Guard>, Json(body): Json<SessionRequest>) -> Response {
+    if guard.admin.admits(body.token.trim()) {
+        return (
+            StatusCode::NO_CONTENT,
+            [(axum::http::header::SET_COOKIE, guard.admin.session_cookie())],
+        )
+            .into_response();
+    }
+
+    // No detail about *why*. "Wrong token" and "no such user" are the same
+    // answer here, and a login endpoint that distinguishes them is an oracle.
+    (
+        StatusCode::UNAUTHORIZED,
+        [(axum::http::header::CONTENT_TYPE, "application/json")],
+        r#"{"error":"that token was not accepted"}"#,
+    )
+        .into_response()
+}
+
+async fn session_delete() -> Response {
+    (
+        StatusCode::NO_CONTENT,
+        [(
+            axum::http::header::SET_COOKIE,
+            crate::auth::Admin::cleared_cookie(),
+        )],
+    )
+        .into_response()
+}
+
+/// Every chain the store has seen, with its head.
+async fn chain_list<S: SnapshotApi, C: CheckpointStore + 'static, K: KeyDirectory, X: Chains>(
+    State(state): State<Arc<ControlState<S, C, K, X>>>,
+) -> Result<Json<Vec<crate::overview::ChainListing>>, ApiError> {
+    Ok(Json(state.chains.listings().await?))
+}
+
+/// The counted shape of one chain.
+///
+/// **Not a verification.** Nothing here re-hashes anything; it is the same
+/// server that serves the events telling you what it thinks is in them. The
+/// dashboard says so in as many words, and points at the evidence pack.
+async fn chain_summary<S: SnapshotApi, C: CheckpointStore + 'static, K: KeyDirectory, X: Chains>(
+    State(state): State<Arc<ControlState<S, C, K, X>>>,
+    Path((tenant_id, system_id)): Path<(String, String)>,
+) -> Result<Json<crate::overview::ChainSummary>, ApiError> {
+    let chain = ChainId {
+        tenant_id,
+        system_id,
+    };
+    Ok(Json(state.chains.summary(&chain).await?))
 }
 
 /// What the export endpoint needs: the head, so a caller can omit the range,
 /// and the events themselves.
-pub trait Chains: ChainSource + ChainExport + 'static {}
-impl<T: ChainSource + ChainExport + 'static> Chains for T {}
+pub trait Chains: ChainSource + ChainExport + crate::overview::ChainOverview + 'static {}
+impl<T: ChainSource + ChainExport + crate::overview::ChainOverview + 'static> Chains for T {}
 
 /// `?from=` and `?to=`, both optional and both inclusive.
 #[derive(Debug, serde::Deserialize)]
@@ -331,28 +448,185 @@ mod tests {
             .unwrap();
         let (source, store, _) = cp.into_parts();
 
-        router(Arc::new(ControlState {
-            snapshots: Snapshots(std::sync::Mutex::new(published)),
-            checkpoints: store,
-            keys: Keys,
-            chains: source,
-        }))
+        router(
+            Arc::new(ControlState {
+                snapshots: Snapshots(std::sync::Mutex::new(published)),
+                checkpoints: store,
+                keys: Keys,
+                chains: source,
+            }),
+            Guard {
+                admin: crate::auth::Admin::new(TEST_TOKEN),
+            },
+        )
     }
 
+    const TEST_TOKEN: &str = "test-operator-token";
+
+    /// Authenticated by default: every existing test in this module is about
+    /// what a handler returns, not about who may call it. The auth behaviour
+    /// has tests of its own below.
     async fn get_body(app: &Router, uri: &str) -> (StatusCode, Vec<u8>) {
+        get_body_as(app, uri, Some(TEST_TOKEN)).await
+    }
+
+    async fn get_body_as(app: &Router, uri: &str, token: Option<&str>) -> (StatusCode, Vec<u8>) {
+        let mut req = axum::http::Request::builder().uri(uri);
+        if let Some(t) = token {
+            req = req.header(axum::http::header::AUTHORIZATION, format!("Bearer {t}"));
+        }
         let res = app
             .clone()
-            .oneshot(
-                axum::http::Request::builder()
-                    .uri(uri)
-                    .body(axum::body::Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(req.body(axum::body::Body::empty()).unwrap())
             .await
             .unwrap();
         let status = res.status();
         let body = res.into_body().collect().await.unwrap().to_bytes().to_vec();
         (status, body)
+    }
+
+    /// The split this whole module exists to enforce. A regression here is
+    /// silent — the endpoint keeps working, it simply works for everyone — so
+    /// it is asserted endpoint by endpoint rather than trusted to a layer.
+    #[tokio::test]
+    async fn the_content_endpoints_refuse_an_unauthenticated_caller() {
+        let app = app(Some(envelope())).await;
+
+        for uri in [
+            "/v1/snapshot",
+            "/v1/prompts/b3:9f2c",
+            "/v1/chains",
+            "/v1/chains/acme/hr-screening/summary",
+            "/v1/chains/acme/hr-screening/events",
+        ] {
+            let (status, _) = get_body_as(&app, uri, None).await;
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "{uri} served a customer's data to nobody in particular"
+            );
+        }
+    }
+
+    /// And the other half, which matters just as much: an auditor checking a
+    /// signature they were handed must not need a credential first.
+    #[tokio::test]
+    async fn the_attestation_endpoints_stay_open() {
+        let app = app(Some(envelope())).await;
+
+        for uri in [
+            "/healthz",
+            "/v1/pubkeys",
+            "/v1/checkpoints/acme/hr-screening",
+        ] {
+            let (status, _) = get_body_as(&app, uri, None).await;
+            assert_eq!(status, StatusCode::OK, "{uri} should need no credential");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_wrong_token_is_refused() {
+        let app = app(Some(envelope())).await;
+        let (status, _) = get_body_as(&app, "/v1/chains", Some("not-the-token")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn a_session_cookie_is_accepted_in_place_of_a_bearer() {
+        let app = app(Some(envelope())).await;
+
+        let res = app
+            .clone()
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/session")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({ "token": TEST_TOKEN }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+        let cookie = res
+            .headers()
+            .get(axum::http::header::SET_COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .expect("a successful login must set a cookie")
+            .to_string();
+
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .uri("/v1/chains")
+                    .header(
+                        axum::http::header::COOKIE,
+                        cookie.split(';').next().unwrap(),
+                    )
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn a_bad_login_says_nothing_useful_about_why() {
+        let app = app(None).await;
+        let res = app
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri("/api/session")
+                    .header(axum::http::header::CONTENT_TYPE, "application/json")
+                    .body(axum::body::Body::from(
+                        serde_json::json!({ "token": "wrong" }).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+        assert!(
+            res.headers().get(axum::http::header::SET_COOKIE).is_none(),
+            "a refused login must not hand out a session"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_chain_list_and_summary_agree_with_the_chain() {
+        let app = app(None).await;
+
+        let (status, body) = get_body(&app, "/v1/chains").await;
+        assert_eq!(status, StatusCode::OK);
+        let listings: Vec<crate::overview::ChainListing> = serde_json::from_slice(&body).unwrap();
+        assert_eq!(listings.len(), 1);
+        assert_eq!(listings[0].system_id, "hr-screening");
+        assert_eq!(listings[0].head_seq, 20);
+
+        let (status, body) = get_body(&app, "/v1/chains/acme/hr-screening/summary").await;
+        assert_eq!(status, StatusCode::OK);
+        let summary: crate::overview::ChainSummary = serde_json::from_slice(&body).unwrap();
+        assert_eq!(summary.event_count, 20);
+        assert_eq!(summary.head_seq, 20);
+        assert!(summary.first_event_at.is_some());
+    }
+
+    /// An empty chain must report absence, not the epoch. A dashboard that
+    /// renders 1970 for a system with no traffic reads as a broken chain.
+    #[tokio::test]
+    async fn an_unknown_chain_summarises_as_empty_rather_than_failing() {
+        let app = app(None).await;
+        let (status, body) = get_body(&app, "/v1/chains/acme/nothing-here/summary").await;
+
+        assert_eq!(status, StatusCode::OK);
+        let summary: crate::overview::ChainSummary = serde_json::from_slice(&body).unwrap();
+        assert_eq!(summary.event_count, 0);
+        assert_eq!(summary.first_event_at, None);
     }
 
     #[tokio::test]

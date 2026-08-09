@@ -346,6 +346,85 @@ pub mod testing {
         }
     }
 
+    /// Counted from the same in-memory events the export serves, so a handler
+    /// test cannot pass with a summary that disagrees with the chain under it.
+    impl crate::overview::ChainOverview for MemoryChain {
+        async fn listings(&self) -> Result<Vec<crate::overview::ChainListing>, ControlError> {
+            let chains = self.chains.lock().unwrap();
+            let mut out: Vec<_> = chains
+                .iter()
+                .map(|(id, events)| crate::overview::ChainListing {
+                    tenant_id: id.tenant_id.clone(),
+                    system_id: id.system_id.clone(),
+                    head_seq: events.last().map_or(0, |e| e.seq),
+                    event_count: events.len() as u64,
+                })
+                .collect();
+            out.sort_by(|a, b| (&a.tenant_id, &a.system_id).cmp(&(&b.tenant_id, &b.system_id)));
+            Ok(out)
+        }
+
+        async fn summary(
+            &self,
+            chain: &ChainId,
+        ) -> Result<crate::overview::ChainSummary, ControlError> {
+            use std::collections::BTreeMap;
+
+            let chains = self.chains.lock().unwrap();
+            let events = chains.get(chain).map_or(&[][..], Vec::as_slice);
+
+            let mut flags: BTreeMap<String, u64> = BTreeMap::new();
+            let mut types: BTreeMap<String, u64> = BTreeMap::new();
+            let mut outcomes: BTreeMap<String, u64> = BTreeMap::new();
+            let mut models: BTreeMap<String, u64> = BTreeMap::new();
+            let mut generations = std::collections::BTreeSet::new();
+            let mut gaps = 0;
+
+            for e in events {
+                for f in &e.emitted.pins.risk_flags {
+                    *flags.entry(f.as_str().to_string()).or_default() += 1;
+                }
+                *types
+                    .entry(e.emitted.event_type.as_str().to_string())
+                    .or_default() += 1;
+                *outcomes
+                    .entry(e.emitted.outcome.as_str().to_string())
+                    .or_default() += 1;
+                *models
+                    .entry(e.emitted.pins.model_version.to_string())
+                    .or_default() += 1;
+                generations.insert(e.emitted.pins.config_generation);
+                if e.emitted.pins.has_gap() {
+                    gaps += 1;
+                }
+            }
+
+            let rank = |m: BTreeMap<String, u64>| {
+                let mut v: Vec<_> = m
+                    .into_iter()
+                    .map(|(name, count)| crate::overview::FlagCount { name, count })
+                    .collect();
+                v.sort_by(|a, b| b.count.cmp(&a.count).then(a.name.cmp(&b.name)));
+                v
+            };
+
+            Ok(crate::overview::ChainSummary {
+                tenant_id: chain.tenant_id.clone(),
+                system_id: chain.system_id.clone(),
+                head_seq: events.last().map_or(0, |e| e.seq),
+                event_count: events.len() as u64,
+                first_event_at: events.first().map(|e| e.emitted.occurred_at.as_micros()),
+                last_event_at: events.last().map(|e| e.emitted.occurred_at.as_micros()),
+                risk_flags: rank(flags),
+                event_types: rank(types),
+                outcomes: rank(outcomes),
+                generations: generations.len() as u64,
+                model_versions: rank(models),
+                events_with_gaps: gaps,
+            })
+        }
+    }
+
     impl ChainExport for MemoryChain {
         async fn events(
             &self,

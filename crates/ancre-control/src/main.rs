@@ -140,9 +140,17 @@ async fn main() -> Result<(), Fatal> {
         )),
     ));
 
+    // The credential for the content half of the read API, and for the
+    // dashboard. Read before the socket is bound so an operator who has not set
+    // one sees the generated token in the startup log rather than after a
+    // failed login.
+    let guard = ancre_control::api::Guard {
+        admin: ancre_control::auth::Admin::from_env(),
+    };
+
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(%addr, "control plane listening");
-    axum::serve(listener, router(state))
+    axum::serve(listener, router(state, guard))
         .with_graceful_shutdown(async {
             let _ = tokio::signal::ctrl_c().await;
         })

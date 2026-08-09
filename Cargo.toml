@@ -75,6 +75,8 @@ rand = "0.8"
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "time", "json", "macros"] }
 clickhouse = { version = "0.13", features = ["time", "uuid"] }
 async-nats = "0.38"
+rust-embed = "8"
+mime_guess = "2"
 
 # observability
 tracing = "0.1"

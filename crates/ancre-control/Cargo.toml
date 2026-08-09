@@ -36,6 +36,10 @@ clickhouse = { workspace = true }
 # hash-critical row mapping must exist exactly once.
 ancre-ingester = { workspace = true }
 async-nats = { workspace = true }
+# The dashboard, compiled into the binary. Build-time only for the JS side:
+# nothing in the shipped image needs Node.
+rust-embed = { workspace = true }
+mime_guess = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }

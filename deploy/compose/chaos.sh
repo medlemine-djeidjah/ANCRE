@@ -54,6 +54,7 @@ export ANCRE_ANTHROPIC_BASE=http://mock-provider:9090
 export ANCRE_CHECKPOINT_EVERY_N=20
 export ANCRE_CHECKPOINT_EVERY_SECS=30
 export ANCRE_CHECKPOINT_INTERVAL_SECS=5
+export ANCRE_ADMIN_TOKEN=${ANCRE_ADMIN_TOKEN:-ancre-demo-operator}
 
 ANCRE_BUILD_SHA=$(git -C ../.. rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
 export ANCRE_BUILD_SHA
@@ -76,7 +77,7 @@ ask() {
     || echo 000
 }
 
-chain() { curl -sS "$CONTROL/v1/chains/$TENANT/$SYSTEM/events"; }
+chain() { curl -sS -H "Authorization: Bearer $ANCRE_ADMIN_TOKEN" "$CONTROL/v1/chains/$TENANT/$SYSTEM/events"; }
 chain_length() { chain | grep -c . || true; }
 
 # Count events of one type in the chain. Cheaper than a JSON parser and this

@@ -38,6 +38,14 @@ pub struct HttpSnapshotSource {
         http_body_util::Full<Bytes>,
     >,
     url: String,
+    /// The control plane's credential.
+    ///
+    /// `/v1/snapshot` is protected, and it is the most sensitive read in the
+    /// system — every system, every route, every pinned model version, and the
+    /// hash of every key. The gateway is a first-class client of it, so it
+    /// carries a credential like any other client rather than the endpoint
+    /// being left open for its convenience.
+    token: Option<String>,
 }
 
 impl std::fmt::Debug for HttpSnapshotSource {
@@ -72,7 +80,21 @@ impl HttpSnapshotSource {
             )
             .build(connector),
             url: format!("{}/v1/snapshot", base.trim_end_matches('/')),
+            token: None,
         })
+    }
+
+    /// The bearer token presented to the control plane.
+    ///
+    /// `None` is legitimate only against a control plane with no credential
+    /// configured. Anywhere else it produces a 401 at cold start, and the
+    /// gateway refuses to bind rather than serving traffic it cannot pin —
+    /// which is the correct failure, and the reason the error names the
+    /// variable to set.
+    #[must_use]
+    pub fn with_token(mut self, token: Option<String>) -> Self {
+        self.token = token.filter(|t| !t.is_empty());
+        self
     }
 }
 
@@ -86,9 +108,13 @@ impl SnapshotSource for HttpSnapshotSource {
     /// describe its own contents, which is the only case where the sender is
     /// the problem.
     async fn fetch(&self) -> Result<SnapshotEnvelope, FeedError> {
-        let req = hyper::Request::builder()
+        let mut req = hyper::Request::builder()
             .uri(&self.url)
-            .header(hyper::header::ACCEPT, "application/json")
+            .header(hyper::header::ACCEPT, "application/json");
+        if let Some(token) = &self.token {
+            req = req.header(hyper::header::AUTHORIZATION, format!("Bearer {token}"));
+        }
+        let req = req
             .body(http_body_util::Full::new(Bytes::new()))
             .map_err(|e| FeedError::Unreachable(e.to_string()))?;
 
@@ -106,6 +132,16 @@ impl SnapshotSource for HttpSnapshotSource {
             .map_err(|e| FeedError::Unreachable(e.to_string()))?
             .to_bytes();
 
+        if status == hyper::StatusCode::UNAUTHORIZED {
+            // Named explicitly, because the generic form of this message sends
+            // an operator to look at the control plane's health when the
+            // problem is one unset variable on this node.
+            return Err(FeedError::Unreachable(
+                "control plane refused this node's credential. Set \
+                 ANCRE_CONTROL_TOKEN to the control plane's ANCRE_ADMIN_TOKEN"
+                    .into(),
+            ));
+        }
         if !status.is_success() {
             return Err(FeedError::Unreachable(format!(
                 "control plane returned {status}: {}",

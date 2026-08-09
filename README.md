@@ -9,7 +9,7 @@ model version actually answered, under which prompt, which configuration, at
 what risk classification — that anyone can verify on a laptop, offline, without
 trusting you or the database it came from.
 
-**Status: MVP complete (M1–M5).** 355 tests, both hash back-ends, both latency
+**Status: MVP complete (M1–M5), plus the dashboard (M6).** 373 tests, both hash back-ends, both latency
 gates passing; 34 of those run against a real ClickHouse, Postgres and NATS.
 `docs/deferred.md` lists every remaining gap, with what it costs. Nothing in it
 blocks an install; several entries should change how you deploy it.
@@ -58,12 +58,34 @@ demonstrates clean rows has not been demonstrated.
 
 ---
 
+## The dashboard
+
+The control plane serves one at its own port — static assets compiled into the
+binary, so there is no fourth container. Sign in with `ANCRE_ADMIN_TOKEN`; the
+quickstart prints it.
+
+It lists chains, shows each one's counted shape, and opens every event's full
+pin set, digests and chain links. What it refuses to show is a green
+**verified** tick. The server rendering that page is the server that stores the
+events, so a claim it makes about their integrity is worth nothing to an
+auditor — instead it reports which sequence ranges carry a signature, and hands
+over an evidence pack to check somewhere the server cannot reach:
+
+```sh
+ancre-verify --pack ./acme-hr-screening --key <fingerprint you got elsewhere>
+```
+
+Access is split on that same reasoning. `/v1/checkpoints/…` and `/v1/pubkeys`
+stay open — signatures over hashes reveal nothing, and an auditor who needs a
+credential before checking one verifies fewer of them. The endpoints that
+describe how a customer runs their AI need the token.
+
 ## Use it
 
 | I want to… | Read |
 |---|---|
 | Point my application at it | [`docs/integrate.md`](docs/integrate.md) — base-URL swap, SDK examples, what the pins mean, failure modes |
-| Run it in front of real traffic | [`docs/deploy.md`](docs/deploy.md) — topology, every environment variable, onboarding a system, key custody, what to alert on |
+| Run it in front of real traffic | [`docs/deploy.md`](docs/deploy.md) — topology, every environment variable, onboarding a system, access control, key custody, what to alert on |
 | Know what is not finished | [`docs/deferred.md`](docs/deferred.md) — **read this before trusting anything here** |
 | Understand why it is built this way | [`ancre-prd-and-architecture.md`](ancre-prd-and-architecture.md), [`mvp-plan.md`](mvp-plan.md), [`version-pin-resolver-spec.md`](version-pin-resolver-spec.md) |
 
@@ -259,6 +281,7 @@ crates/
   ancre-control/    [bin] axum, Postgres, snapshot build, checkpoint signer
   ancre-verify/     [bin] standalone offline verifier
 bench/              criterion, gating CI
+crates/ancre-control/ui/   the dashboard. React + Vite + Tailwind, embedded
 deploy/compose/     one-command self-host, quickstart, chaos pass
 docs/               deploy, integrate, deferred work, the AI Act mapping table
 ```

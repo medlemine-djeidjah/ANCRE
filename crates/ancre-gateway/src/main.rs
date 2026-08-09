@@ -68,7 +68,12 @@ async fn main() -> Result<(), Fatal> {
 
     let control_url = env_or("ANCRE_CONTROL_URL", "http://127.0.0.1:8081");
     let feed = Arc::new(ConfigFeed::new(
-        HttpSnapshotSource::new(&control_url)?,
+        // The gateway authenticates to the control plane like any other
+        // client of its read API. One shared secret in the MVP: this is the
+        // same value as the control plane's `ANCRE_ADMIN_TOKEN`, and giving
+        // the fleet its own identity is V1 (docs/deferred.md, D22).
+        HttpSnapshotSource::new(&control_url)?
+            .with_token(std::env::var("ANCRE_CONTROL_TOKEN").ok()),
         Arc::clone(&resolver),
         fork.clone(),
         node_id.clone(),

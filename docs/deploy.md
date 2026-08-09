@@ -65,6 +65,7 @@ manifest.
 |---|---|---|
 | `ANCRE_LISTEN` | `0.0.0.0:8080` | |
 | `ANCRE_CONTROL_URL` | `http://127.0.0.1:8081` | Poll backstop, and cold start |
+| `ANCRE_CONTROL_TOKEN` | — | **Required** against a control plane with a token set. `/v1/snapshot` is protected and the gateway is a client of it |
 | `ANCRE_NATS_URL` | `nats://127.0.0.1:4222` | Telemetry out, config in |
 | `ANCRE_NODE_ID` | `$HOSTNAME`, else `gw-<pid>` | Goes into every event |
 | `ANCRE_FAIL_CLOSED_ON_STALE` | `true` | `false` is a governance decision and is logged as one |
@@ -94,6 +95,7 @@ startup, and never prints the credentials themselves.
 | `ANCRE_CHECKPOINT_EVERY_N` | `10000` | Seal after this many new events on a chain |
 | `ANCRE_CHECKPOINT_EVERY_SECS` | `300` | …or this long since its last checkpoint |
 | `ANCRE_CHECKPOINT_INTERVAL_SECS` | `30` | How often the checkpointer is offered a turn |
+| `ANCRE_ADMIN_TOKEN` | generated per process | The dashboard's login and the read API's credential. Unset means one is minted at boot and printed once — fine for a demo, wrong for anything you sign in to twice |
 
 ### Ingester
 
@@ -201,7 +203,63 @@ events.
 
 ---
 
-## 5. Key custody
+## 5. Access control
+
+The read API is split, and the split is the security model:
+
+| Open, no credential | Protected by `ANCRE_ADMIN_TOKEN` |
+|---|---|
+| `GET /healthz` | `GET /v1/chains` and `/v1/chains/…/events`, `/summary` |
+| `GET /v1/checkpoints/{tenant}/{system}` | `GET /v1/snapshot` |
+| `GET /v1/pubkeys` | `GET /v1/prompts/{hash}` |
+
+The left column is what an auditor needs to *check* evidence they were already
+handed. A checkpoint is a signature over a root hash and a public key is a
+public key: neither reveals a customer's traffic, and an auditor who has to
+obtain a credential before verifying a signature is an auditor who verifies
+less. The right column is the customer's business — no prompts or completions,
+but `system_id`, timings, token counts and model versions are a competitive
+picture of how they run their AI.
+
+Two ways to present the token:
+
+```sh
+# machines
+curl -H "Authorization: Bearer $ANCRE_ADMIN_TOKEN" localhost:8081/v1/chains
+
+# browsers — sets an HttpOnly, SameSite=Strict session cookie for 8 hours
+curl -X POST localhost:8081/api/session -H 'content-type: application/json' \
+  -d "{\"token\":\"$ANCRE_ADMIN_TOKEN\"}"
+```
+
+**The gateway is a client too.** It reads `/v1/snapshot`, so it needs
+`ANCRE_CONTROL_TOKEN` set to the same value, or it will refuse to bind its
+socket at cold start — which is the correct failure, and the log line names the
+variable.
+
+What this is not: user accounts. One shared secret, no roles, no per-tenant
+scoping, and no record of who read what. Anyone who can log in can read every
+tenant's chains. That is tracked as D22 and it is the first thing to fix before
+two customers share a deployment.
+
+**The compose file ships a default token** (`ancre-insecure-default`) so that
+`docker compose up` needs no configuration. It is a published string, the
+control plane warns about it on every boot, and any deployment reachable by
+anyone you do not trust must set a real one in `deploy/compose/.env`.
+
+## 6. The dashboard
+
+Served by the control plane itself at its own port — static assets compiled
+into the binary, so there is no fourth container and no second origin. Sign in
+with the operator token.
+
+It shows chains, their counted shape, and every event's full pin set. What it
+deliberately does **not** show is a green "verified" tick: the server rendering
+that page is the server that stores the events, so any claim it makes about
+their integrity is unverifiable by construction. It reports which ranges carry
+a signature, and hands over an evidence pack to check somewhere else.
+
+## 7. Key custody
 
 The checkpoint signing key is the root of the whole evidence claim. In the MVP
 it is a control-plane-local file, minted on first boot if absent and written
@@ -228,7 +286,7 @@ says nothing about provenance. The verifier prints that distinction itself.
 
 ---
 
-## 6. Health, and what to alert on
+## 8. Health, and what to alert on
 
 | Check | Endpoint |
 |---|---|
@@ -252,17 +310,14 @@ Worth an alert:
 
 ---
 
-## 7. What is not production-ready
+## 9. What is not production-ready
 
 Read `docs/deferred.md` in full before running this in front of real traffic.
 The entries that most often change a deployment decision:
 
-- **The read API is unauthenticated** (D17). Checkpoints and public keys are
-  safe to expose — they are signatures over hashes. `GET /v1/chains/…/events`
-  is not: it serves digests rather than prompts and completions, so no payload
-  leaks, but timings, token counts, `system_id` and model versions are a
-  competitive picture of how a customer runs their AI. **Put your own
-  authenticating proxy in front of port 8081, or do not expose it.**
+- **Auth is one shared token** (D22). It protects the content endpoints, which
+  is the gap that mattered — but there are no identities, no per-tenant
+  scoping, and no access log. Anyone who can sign in reads every tenant.
 - **Dedupe is a bounded in-memory window** of 100 000 `event_id`s (D10). A
   redelivery older than that doubles an event, and the checkpointer then
   refuses that chain's range for good.

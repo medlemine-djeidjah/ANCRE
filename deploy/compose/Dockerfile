@@ -15,6 +15,22 @@
 
 # ---------------------------------------------------------------------------
 
+# The dashboard, built first because the Rust build embeds its output.
+#
+# Node is a **build-time** dependency and nothing else: no stage below this one
+# inherits from it, and the shipped images contain a single static binary each.
+# That is the price of keeping the three-container ceiling — the alternative was
+# a fourth service whose only job is to serve two files.
+FROM node:24-slim AS ui
+WORKDIR /ui
+# Manifests first, so a source-only change does not re-resolve the dependency
+# graph. `npm ci` rather than `install`, because an image built from a
+# re-resolved lockfile is not the artefact that was tested.
+COPY crates/ancre-control/ui/package.json crates/ancre-control/ui/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY crates/ancre-control/ui/ ./
+RUN npm run build
+
 FROM rust:1.93-slim-bookworm AS builder
 
 # rustls everywhere, so there is no OpenSSL to link against — this is the whole
@@ -28,6 +44,12 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY bench ./bench
+
+# The built dashboard, over the empty `ui/dist` the checkout carries. It has to
+# land before `cargo build`, because `rust-embed` reads the directory at
+# compile time — a binary built without this serves the "not built" page
+# instead of the app.
+COPY --from=ui /ui/dist ./crates/ancre-control/ui/dist
 
 # The commit that produced these binaries, stamped into `gateway_version` and
 # from there into every pin. Passed in rather than read from `.git`, which is

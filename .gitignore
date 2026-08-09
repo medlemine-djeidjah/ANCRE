@@ -7,3 +7,8 @@
 # Written by deploy/compose/quickstart.sh
 deploy/compose/evidence/
 deploy/compose/.env
+crates/ancre-control/ui/dist/*
+!crates/ancre-control/ui/dist/.gitkeep
+
+# Anywhere, not just at the root — the dashboard lives inside a crate.
+node_modules/

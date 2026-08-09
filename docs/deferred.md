@@ -11,8 +11,7 @@ Two categories, and the distinction matters:
 
 Update this file in the same commit that creates or clears an entry.
 
-Last updated: end of M5, after the deployment and integration guides were
-written — which is how two of the entries below came to be found.
+Last updated: M6, the dashboard.
 
 The seam has moved again, and this time it moved off the critical path. Every
 milestone's done-when has been met: `docker compose up` brings up a seeded,
@@ -21,9 +20,9 @@ to a verified evidence pack without a question and without anybody's API key;
 and the last step of that script edits a row in ClickHouse and watches both the
 chain and the signature over it refuse it.
 
-What is left is listed below, and none of it blocks an install. Two entries
-deserve reading before a production deployment rather than after: the read API
-is unauthenticated (D17), and dedupe is a bounded in-memory window (D10). The
+What is left is listed below, and none of it blocks an install. The entry that
+most deserves reading before a production deployment is D10, dedupe as a
+bounded in-memory window. The
 largest single item is that **CI has still never run** (D5) — there is no
 remote — so every claim in this repository is a claim about a 20-core dev
 machine.
@@ -52,9 +51,26 @@ Things that affect what an auditor can be shown.
 | E8 | **`error_code` is only the HTTP status.** Provider error bodies are not parsed for a code, deliberately: guessing at a provider-specific shape would put a fabricated string in the evidence | `ancre-gateway/src/tap.rs` | by design |
 | E13 | **A pack's manifest is unsigned, and so is the `prev_hash` it may declare.** The verifier says so on both counts and neither is load-bearing — the checkpoints are what bind the pack, and an attacker who re-anchors a forged prefix still cannot produce a signature over it. It does mean a partial export's anchor should be confirmed out of band, which `--from` exists for | `ancre-verify/src/pack.rs` | by design |
 
+## Cleared in M6
+
+- ~~D17 the read API is unauthenticated~~ — the split is now enforced and
+  tested endpoint by endpoint. **Protected:** `/v1/chains…`, `/v1/snapshot`,
+  `/v1/prompts/{hash}` — everything that describes how a customer runs their
+  AI. **Open:** `/healthz`, `/v1/checkpoints/…`, `/v1/pubkeys` — signatures
+  over hashes, which reveal nothing and which an auditor must not need a
+  credential to check. One shared token, presented as a bearer or as an
+  `HttpOnly; SameSite=Strict` session cookie; what it does *not* buy is in D22
+- ~~the gateway could read the fleet's whole configuration unauthenticated~~ —
+  found by running the quickstart against the new auth, not by a test:
+  `/v1/snapshot` is the most sensitive read in the system and the gateway is a
+  client of it, so the gateway now carries `ANCRE_CONTROL_TOKEN` like any other
+  client. The alternative — leaving the endpoint open for the gateway's
+  convenience — would have protected the events while publishing every route,
+  model version and key hash that produced them
+
 ## Cleared in M5
 
-Kept briefly so the history is readable; delete at the start of M6.
+Kept briefly so the history is readable; delete at the start of M7.
 
 - ~~B3 no Dockerfiles~~ — one `deploy/compose/Dockerfile` with a shared builder
   and five runtime stages, selected by `target:`. One Dockerfile and not three,
@@ -156,7 +172,8 @@ Shortcuts. Each one is cheap now and expensive later.
 | D2 | **`PromptRef::Inline` is never constructed.** `ConfigSnapshot::build` always produces `Lazy`, and the gateway never fetches a body, so no prompt body is ever resident on the hot path. Pins are unaffected — they only need the hash. The control plane now *stores* bodies and serves them from `GET /v1/prompts/{hash}`, verified against their own key, so the missing half is the fetch and the resolver's LRU | `ancre-types`, `ancre-resolver` | Prompt bodies cannot be shown next to the events that used them |
 | D3 | **Multi-line SSE `data:` fields take the first line.** Legal in SSE, emitted by no LLM provider, and joining fragments would allocate on the hot path | `ancre-provider/src/sse.rs` | A future provider's pins are silently truncated |
 | D4 | **`bench-drift` does not gate.** Criterion alone cannot fail a build; it needs `critcmp` against a stored baseline | `.github/workflows/ci.yml` | Slow drift between the absolute gates goes unnoticed |
-| D17 | **The export endpoint is unauthenticated,** like the checkpoints it sits beside — but unlike a checkpoint it serves *content*. Digests rather than prompts and completions, so no payload leaks, yet `system_id`, timings, token counts and model versions are a competitive picture of how a customer runs their AI. Authz for the read API is V1; until then a deployment that cares has to put its own gateway in front | `ancre-control/src/api.rs` | A customer's AI usage profile is readable by anyone who can reach the control plane |
+| D22 | **One shared operator token, not identities.** Auth is a single secret: anyone who can log in reads *every* tenant's chains, the gateway presents the same credential as a human operator, there are no roles and nothing records who read what. That is honest for an MVP whose registry is edited with `psql`, and it is the wrong shape the moment two customers share a deployment — a multi-tenant SaaS needs per-tenant scoping and an access log of its own | `ancre-control/src/auth.rs` | A support engineer, a gateway node and a customer's auditor are indistinguishable to the API |
+| D23 | **The dashboard was verified over HTTP, not visually.** Every endpoint it uses is exercised end to end and the app shell, assets and client-side routes are asserted in tests — but nobody has looked at it in a browser, so layout, contrast and responsive behaviour are unreviewed | `crates/ancre-control/ui/` | The demo surface has a visual defect nobody notices until it is on a screen in front of a buyer |
 | D15 | **Heartbeats only cover chains this process has already seen.** `Ingester::heartbeats` walks its live `ChainWriter`s, and a restart starts with none — so a system that goes quiet across a restart stops emitting the daily heartbeat that makes its silence countable. Absence of evidence and absence of a system look identical again, which is the exact thing the heartbeat exists to prevent (mvp-plan §8.4). The fix is seeding writers from the store's chain list at startup | `ancre-ingester/src/pipeline.rs` | A silent system is indistinguishable from a decommissioned one, after any restart |
 | D16 | **The gateway trusts the first snapshot it is handed.** Cold start retries for 60s and then exits, which is right, but there is no lower bound on what it will accept — an empty registry publishes an empty snapshot, and the gateway installs it and serves 503s for every key. The compose stack now closes the *timing* half of this by making Postgres unhealthy until the registry has at least one key, so the control plane cannot publish an empty snapshot during init; the gateway itself still has no floor | `ancre-gateway/src/main.rs` | A registry pointed at the wrong database looks like a working gateway with no customers |
 | D14 | **Generation allocation is serialised; publication is not.** `allocate_generation` holds an advisory lock, so two control-plane replicas never mint the same number. The bus send happens after the lock is released, so replica A can allocate 42, replica B allocate 43 and publish first, and A's 42 lands after it. `PinResolver::reload` installs whatever it is given, so a gateway would go backwards a generation until the next publish. One replica is the MVP deployment and the fix is a monotonicity check in `reload`, which is cheap — it is listed rather than done because the check needs a decision about what a gateway should do when it *legitimately* sees a lower generation after a control-plane rollback | `ancre-control/src/postgres.rs`, `ancre-resolver/src/lib.rs` | Two replicas can flip a fleet between two configurations |

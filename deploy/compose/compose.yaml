@@ -35,6 +35,10 @@ services:
     ports: ["8080:8080"]
     environment:
       ANCRE_CONTROL_URL: http://control:8081
+      # `/v1/snapshot` is protected — it is the fleet's whole configuration —
+      # and the gateway is a client of it like anything else. Same secret as
+      # the control plane's ANCRE_ADMIN_TOKEN in the MVP.
+      ANCRE_CONTROL_TOKEN: ${ANCRE_ADMIN_TOKEN:-ancre-insecure-default}
       ANCRE_NATS_URL: nats://nats:4222
       # Fail closed on stale config for high-risk systems. Configurable,
       # defaulted on, and turning it off is logged as a governance event.
@@ -104,6 +108,14 @@ services:
       ANCRE_CHECKPOINT_EVERY_N: ${ANCRE_CHECKPOINT_EVERY_N:-10000}
       ANCRE_CHECKPOINT_EVERY_SECS: ${ANCRE_CHECKPOINT_EVERY_SECS:-300}
       ANCRE_CHECKPOINT_INTERVAL_SECS: ${ANCRE_CHECKPOINT_INTERVAL_SECS:-30}
+      # The dashboard's login, and the credential for the content half of the
+      # read API. Unset means one is generated at startup and printed once in
+      # the log — fine for a demo, wrong for anything you log in to twice.
+      # Defaulted so that `docker compose up` needs no configuration at all.
+      # It is a published string and therefore not a secret: the control plane
+      # warns about it on every boot, and any deployment reachable by anyone
+      # you do not trust must set a real one in `deploy/compose/.env`.
+      ANCRE_ADMIN_TOKEN: ${ANCRE_ADMIN_TOKEN:-ancre-insecure-default}
     volumes:
       - control-keys:/var/lib/ancre/keys
     depends_on:
