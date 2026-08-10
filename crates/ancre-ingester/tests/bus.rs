@@ -84,6 +84,44 @@ impl EventStore for &FlakyStore {
         }
         Ok(self.rows(chain).last().map(|r| (r.seq, r.event_hash)))
     }
+
+    async fn stored(
+        &self,
+        chain: &ChainId,
+        ids: &[uuid::Uuid],
+    ) -> Result<Vec<(uuid::Uuid, u64)>, IngestError> {
+        if self.down.load(Ordering::SeqCst) {
+            return Err(IngestError::Store("connection refused".into()));
+        }
+        Ok(self
+            .rows(chain)
+            .into_iter()
+            .filter(|r| ids.contains(&r.emitted.event_id))
+            .map(|r| (r.emitted.event_id, r.seq))
+            .collect())
+    }
+
+    async fn chains(&self) -> Result<Vec<(ChainId, u64, Hash32)>, IngestError> {
+        if self.down.load(Ordering::SeqCst) {
+            return Err(IngestError::Store("connection refused".into()));
+        }
+        let mut heads: std::collections::HashMap<ChainId, (u64, Hash32)> =
+            std::collections::HashMap::new();
+        for r in self.rows.lock().unwrap().iter() {
+            let chain = ChainId {
+                tenant_id: r.emitted.tenant_id.to_string(),
+                system_id: r.emitted.system_id.to_string(),
+            };
+            let head = heads.entry(chain).or_insert((0, ancre_canon::GENESIS));
+            if r.seq >= head.0 {
+                *head = (r.seq, r.event_hash);
+            }
+        }
+        Ok(heads
+            .into_iter()
+            .map(|(c, (seq, hash))| (c, seq, hash))
+            .collect())
+    }
 }
 
 /// A distinct system per test. Combined with `config_for`, each test gets its

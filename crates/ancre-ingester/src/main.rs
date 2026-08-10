@@ -67,9 +67,28 @@ async fn run() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         ..ConsumerConfig::default()
     };
 
+    let mut ingester = Ingester::new(store, node_id.clone());
+
+    // Take over every chain the store already holds, before consuming
+    // anything. A chain with no traffic has no reason to build a writer on its
+    // own, and it is precisely the silent chains whose daily heartbeat is the
+    // only evidence they still exist.
+    //
+    // Not fatal: an ingester that cannot reach ClickHouse at startup should
+    // still come up and consume once it can, and traffic builds writers by
+    // itself. What is lost by carrying on is heartbeats for chains that stay
+    // quiet until the next restart, which is worth a loud line in the log.
+    match ingester.seed_from_store().await {
+        Ok(seeded) => tracing::info!(chains = seeded, "seeded writers from the store"),
+        Err(e) => tracing::error!(
+            error = %e,
+            "could not seed writers from the store — chains with no traffic \
+             will not be heartbeated until a restart that can reach it",
+        ),
+    }
+
     let url = env_or("ANCRE_NATS_URL", "nats://127.0.0.1:4222");
-    let consumer =
-        NatsConsumer::connect(&url, Ingester::new(store, node_id.clone()), config.clone()).await?;
+    let consumer = NatsConsumer::connect(&url, ingester, config.clone()).await?;
 
     tracing::info!(
         node_id,

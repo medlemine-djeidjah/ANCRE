@@ -122,12 +122,28 @@ directory. Outside compose, apply them yourself:
 ```sh
 psql "$DATABASE_URL" -f deploy/compose/init/postgres/001_registry.sql
 clickhouse-client --queries-file deploy/compose/init/clickhouse/001_audit_events.sql
+clickhouse-client --queries-file deploy/compose/init/clickhouse/002_dedupe_index.sql
 ```
 
 `audit_events` is **frozen** (mvp-plan §4). Adding a hashed column changes the
 canonical encoding, which means every chain written before the change verifies
 under a different rule set. `canon_version` exists so that if you must break
 it, you break it explicitly.
+
+**Upgrading a deployment created before M7.** `002` adds the `event_id` skip
+index that the ingester's duplicate check reads. On a fresh data directory
+`001` already carries it and `002` is a no-op; on an existing one the images do
+not re-run either file, so apply it by hand:
+
+```sh
+docker compose exec clickhouse clickhouse-client \
+  --queries-file /docker-entrypoint-initdb.d/002_dedupe_index.sql
+```
+
+Skipping it is safe — the duplicate check still returns the right answer, it
+just reads the chain's granules instead of skipping them. `MATERIALIZE INDEX`
+is a background mutation, so the statement returns before the index has filled
+in behind it.
 
 Start order does not matter — every Ancre service exits loudly when a
 dependency is unreachable at boot and is expected to be restarted — but the

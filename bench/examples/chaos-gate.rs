@@ -35,6 +35,10 @@ const BATCH: u64 = 500;
 #[derive(Default)]
 struct FlakyStore {
     rows: Mutex<Vec<AuditEvent>>,
+    /// `event_id` → `seq`, maintained on insert. The real store answers the
+    /// dedupe lookup from an index; a fake that answered it with a linear scan
+    /// would make this gate measure the fake.
+    by_id: Mutex<std::collections::HashMap<uuid::Uuid, u64>>,
     down: AtomicBool,
 }
 
@@ -42,6 +46,10 @@ impl EventStore for &FlakyStore {
     async fn insert(&self, batch: &[AuditEvent]) -> Result<(), IngestError> {
         if self.down.load(Ordering::SeqCst) {
             return Err(IngestError::Store("connection refused".into()));
+        }
+        let mut by_id = self.by_id.lock().unwrap();
+        for e in batch {
+            by_id.insert(e.emitted.event_id, e.seq);
         }
         self.rows.lock().unwrap().extend_from_slice(batch);
         Ok(())
@@ -53,6 +61,42 @@ impl EventStore for &FlakyStore {
         }
         let rows = self.rows.lock().unwrap();
         Ok(rows.last().map(|r| (r.seq, r.event_hash)))
+    }
+
+    async fn stored(
+        &self,
+        _chain: &ChainId,
+        ids: &[uuid::Uuid],
+    ) -> Result<Vec<(uuid::Uuid, u64)>, IngestError> {
+        if self.down.load(Ordering::SeqCst) {
+            return Err(IngestError::Store("connection refused".into()));
+        }
+        let by_id = self.by_id.lock().unwrap();
+        Ok(ids
+            .iter()
+            .filter_map(|id| by_id.get(id).map(|seq| (*id, *seq)))
+            .collect())
+    }
+
+    async fn chains(&self) -> Result<Vec<(ChainId, u64, Hash32)>, IngestError> {
+        if self.down.load(Ordering::SeqCst) {
+            return Err(IngestError::Store("connection refused".into()));
+        }
+        let rows = self.rows.lock().unwrap();
+        Ok(rows
+            .last()
+            .map(|r| {
+                (
+                    ChainId {
+                        tenant_id: r.emitted.tenant_id.to_string(),
+                        system_id: r.emitted.system_id.to_string(),
+                    },
+                    r.seq,
+                    r.event_hash,
+                )
+            })
+            .into_iter()
+            .collect())
     }
 }
 
@@ -117,13 +161,40 @@ async fn main() -> std::process::ExitCode {
         next += BATCH;
     }
 
+    // The failure mode this phase exists for does not error and does not gap.
+    // A restart empties the dedupe window, so every message the bus still
+    // holds unacked is one the new process cannot recognise. Chained again,
+    // they take fresh seqs and the chain verifies perfectly — it simply claims
+    // more traffic than happened, and the checkpointer then refuses the range
+    // for good because the leaf count stops matching. Run at scale because by
+    // now the window has evicted, which is the state a restart inherits.
+    println!("phase 5: the process restarts, the bus redelivers the last {BATCH}");
+    drop(ing);
+    let mut restarted = Ingester::new(&store, "ing-2");
+    let seeded = restarted.seed_from_store().await.unwrap();
+
+    let replayed = batch(next - BATCH, BATCH);
+    let r = restarted.ingest(replayed).await.unwrap();
+    let redeliveries_caught = r.duplicates;
+    let chained_after_restart = r.chained;
+
+    // A silent chain still has to be countable after a restart, which is only
+    // true if the restart took over its writer.
+    let day = ancre_types::Timestamp::from_micros(1_754_400_000_000_000);
+    let heartbeats_written = restarted.heartbeats(day).await.unwrap();
+    // Same day, second process-lifetime: the store already holds it.
+    let mut again = Ingester::new(&store, "ing-3");
+    again.seed_from_store().await.unwrap();
+    let heartbeats_repeated = again.heartbeats(day).await.unwrap();
+
     let elapsed = started.elapsed();
     let rows = {
         let mut r = store.rows.lock().unwrap().clone();
         r.sort_by_key(|e| e.seq);
         r
     };
-    let total = BEFORE + DURING + AFTER;
+    // The heartbeat is a real event on the chain and counts toward the total.
+    let total = BEFORE + DURING + AFTER + 1;
 
     println!("\nresults");
     println!("  rows at end of outage:      {rows_after_outage} (phase 1 wrote {BEFORE})");
@@ -174,6 +245,27 @@ async fn main() -> std::process::ExitCode {
         "the proof stays logarithmic",
         proof.path.len() <= 20,
         &format!("{} hashes for {total} events", proof.path.len()),
+    );
+
+    ok &= expect(
+        "a restart recognises redeliveries its window cannot remember",
+        redeliveries_caught == BATCH && chained_after_restart == 0,
+        &format!("{redeliveries_caught} of {BATCH} caught, {chained_after_restart} chained again"),
+    );
+    ok &= expect(
+        "a restart takes over the chains already in the store",
+        seeded == 1,
+        &format!("{seeded} chains seeded"),
+    );
+    ok &= expect(
+        "a restarted process still heartbeats a chain that has gone quiet",
+        heartbeats_written == 1,
+        &format!("{heartbeats_written} written"),
+    );
+    ok &= expect(
+        "a second restart the same day does not write a second heartbeat",
+        heartbeats_repeated == 0,
+        &format!("{heartbeats_repeated} written"),
     );
 
     println!(

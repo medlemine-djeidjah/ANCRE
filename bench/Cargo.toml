@@ -30,6 +30,7 @@ bytes = { workspace = true }
 tokio = { workspace = true }
 arc-swap = { workspace = true }
 smallvec = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

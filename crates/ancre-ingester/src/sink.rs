@@ -6,6 +6,7 @@
 //! without a ten-minute outage.
 
 use ancre_types::AuditEvent;
+use uuid::Uuid;
 
 use crate::chain_writer::IngestError;
 
@@ -29,6 +30,37 @@ pub trait EventStore: Send + Sync {
         &self,
         chain: &ancre_chain::ChainId,
     ) -> impl std::future::Future<Output = Result<Option<(u64, ancre_canon::Hash32)>, IngestError>> + Send;
+
+    /// Which of `ids` this chain already holds, and at what `seq`.
+    ///
+    /// The durable half of deduplication. `ChainWriter`'s `seen` set is a
+    /// bounded window and a restart empties it entirely, so it cannot answer
+    /// "has this event ever been written" — only "recently, by me". A
+    /// redelivery older than the window would otherwise be chained a second
+    /// time at a new `seq`, which does not error: the chain still verifies and
+    /// simply describes more traffic than happened, and the checkpointer then
+    /// refuses that range for good because the leaf count no longer matches.
+    ///
+    /// ClickHouse has no unique constraint to lean on — `ReplacingMergeTree`
+    /// deduplicates eventually and in the background, which is far too late
+    /// when the damage is a `seq` that has already been allocated. So the
+    /// check is a lookup before chaining rather than a constraint at insert,
+    /// and the skip index that makes it cheap is in `001_audit_events.sql`.
+    fn stored(
+        &self,
+        chain: &ancre_chain::ChainId,
+        ids: &[Uuid],
+    ) -> impl std::future::Future<Output = Result<Vec<(Uuid, u64)>, IngestError>> + Send;
+
+    /// Every chain the store holds, with its head.
+    ///
+    /// Read once at startup so heartbeats cover chains that have gone quiet.
+    /// See `Ingester::seed_from_store`.
+    fn chains(
+        &self,
+    ) -> impl std::future::Future<
+        Output = Result<Vec<(ancre_chain::ChainId, u64, ancre_canon::Hash32)>, IngestError>,
+    > + Send;
 }
 
 /// A borrowed store is a store.
@@ -51,6 +83,22 @@ impl<S: EventStore> EventStore for &S {
     ) -> impl std::future::Future<Output = Result<Option<(u64, ancre_canon::Hash32)>, IngestError>> + Send
     {
         (**self).head(chain)
+    }
+
+    fn stored(
+        &self,
+        chain: &ancre_chain::ChainId,
+        ids: &[Uuid],
+    ) -> impl std::future::Future<Output = Result<Vec<(Uuid, u64)>, IngestError>> + Send {
+        (**self).stored(chain, ids)
+    }
+
+    fn chains(
+        &self,
+    ) -> impl std::future::Future<
+        Output = Result<Vec<(ancre_chain::ChainId, u64, ancre_canon::Hash32)>, IngestError>,
+    > + Send {
+        (**self).chains()
     }
 }
 

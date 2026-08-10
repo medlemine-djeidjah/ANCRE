@@ -342,6 +342,24 @@ struct HeadRow {
     head_hash: [u8; 32],
 }
 
+/// One `(event_id, seq)` the store already holds. See `EventStore::stored`.
+#[derive(Debug, Row, Deserialize)]
+struct StoredRow {
+    #[serde(with = "clickhouse::serde::uuid")]
+    event_id: Uuid,
+    seq: u64,
+}
+
+/// One chain and its head, for startup seeding. Same `argMax` reasoning as
+/// `HeadRow`, and the same reason the fields are not named `seq`.
+#[derive(Debug, Row, Deserialize)]
+struct ChainRow {
+    tenant_id: String,
+    system_id: String,
+    head_seq: u64,
+    head_hash: [u8; 32],
+}
+
 fn store_err(e: &clickhouse::error::Error) -> IngestError {
     IngestError::Store(e.to_string())
 }
@@ -397,6 +415,68 @@ impl EventStore for ClickHouseStore {
             .next()
             .filter(|h| h.head_seq > 0)
             .map(|h| (h.head_seq, Hash32::from_bytes(h.head_hash))))
+    }
+
+    /// The durable dedupe lookup.
+    ///
+    /// Scoped to one chain so the table's `ORDER BY (tenant_id, system_id,
+    /// seq)` prefix does most of the work, and the `event_id` bloom filter
+    /// skips granules within that. The ids are bound as strings: ClickHouse
+    /// converts a string literal to `UUID` for the comparison, and binding the
+    /// `Uuid` type directly would render a quoted form the `IN` cannot match
+    /// against the column type.
+    async fn stored(&self, chain: &ChainId, ids: &[Uuid]) -> Result<Vec<(Uuid, u64)>, IngestError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let as_text: Vec<String> = ids.iter().map(ToString::to_string).collect();
+        let rows = self
+            .client
+            .query(
+                "SELECT event_id, seq FROM audit_events \
+                 WHERE tenant_id = ? AND system_id = ? AND event_id IN (?)",
+            )
+            .bind(&chain.tenant_id)
+            .bind(&chain.system_id)
+            .bind(&as_text)
+            .fetch_all::<StoredRow>()
+            .await
+            .map_err(|e| store_err(&e))?;
+
+        Ok(rows.into_iter().map(|r| (r.event_id, r.seq)).collect())
+    }
+
+    /// Every chain with at least one row, and its head.
+    ///
+    /// Run once at startup, so a full `GROUP BY` is affordable in a way it
+    /// would not be per batch. The grouping keys are the table's sorting-key
+    /// prefix, so this reads far less than the row count suggests.
+    async fn chains(&self) -> Result<Vec<(ChainId, u64, Hash32)>, IngestError> {
+        let rows = self
+            .client
+            .query(
+                "SELECT tenant_id, system_id, \
+                 max(seq) AS head_seq, argMax(event_hash, seq) AS head_hash \
+                 FROM audit_events GROUP BY tenant_id, system_id",
+            )
+            .fetch_all::<ChainRow>()
+            .await
+            .map_err(|e| store_err(&e))?;
+
+        Ok(rows
+            .into_iter()
+            .filter(|c| c.head_seq > 0)
+            .map(|c| {
+                (
+                    ChainId {
+                        tenant_id: c.tenant_id,
+                        system_id: c.system_id,
+                    },
+                    c.head_seq,
+                    Hash32::from_bytes(c.head_hash),
+                )
+            })
+            .collect())
     }
 }
 

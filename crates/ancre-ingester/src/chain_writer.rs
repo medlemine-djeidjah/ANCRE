@@ -35,6 +35,14 @@ pub struct ChainWriter {
     seen: HashMap<Uuid, u64>,
     /// Insertion order, so the window can be trimmed without scanning.
     seen_order: std::collections::VecDeque<Uuid>,
+    /// True while `seen` is not a window but a *complete* answer for this
+    /// chain: the chain was empty when this writer took it over and nothing
+    /// has been evicted since, so every event that exists is in the map.
+    ///
+    /// While it holds, the durable check in `Ingester` can be skipped — which
+    /// is what keeps a fresh install from paying a round trip per batch for a
+    /// question it already knows the answer to.
+    window_complete: bool,
     last_heartbeat_day: Option<i64>,
 }
 
@@ -59,8 +67,35 @@ impl ChainWriter {
             node_id: std::sync::Arc::from(node_id),
             seen: HashMap::new(),
             seen_order: std::collections::VecDeque::new(),
+            // Resuming a chain that already has rows means the store holds
+            // events this writer has never seen, so its memory starts
+            // incomplete and the durable check is required from the first
+            // batch. A chain starting at seq 0 has nothing to have missed.
+            window_complete: last_seq == 0,
             last_heartbeat_day: None,
         }
+    }
+
+    /// Whether `seen` can answer "has this event ever been written to this
+    /// chain" on its own. When false, the caller must ask the store.
+    #[must_use]
+    pub fn window_is_complete(&self) -> bool {
+        self.window_complete
+    }
+
+    /// Whether this writer already knows `event_id` was written.
+    #[must_use]
+    pub fn has_seen(&self, event_id: Uuid) -> bool {
+        self.seen.contains_key(&event_id)
+    }
+
+    /// Record that the *store* already holds `event_id` at `seq`.
+    ///
+    /// Used to fold a durable lookup back into the in-memory window, so the
+    /// same id is not asked about twice and `append` refuses it exactly as it
+    /// refuses one this process wrote itself.
+    pub fn remember_stored(&mut self, event_id: Uuid, seq: u64) {
+        self.remember(event_id, seq);
     }
 
     #[must_use]
@@ -143,7 +178,32 @@ impl ChainWriter {
             if let Some(old) = self.seen_order.pop_front() {
                 self.seen.remove(&old);
             }
+            // The first eviction is the moment this stops being a complete
+            // record of the chain and becomes a window. Everything after it
+            // has to be confirmed against the store.
+            self.window_complete = false;
         }
+    }
+
+    /// Which day `now` falls in, as a count of whole days since the epoch.
+    fn day_of(now: Timestamp) -> i64 {
+        now.as_micros().div_euclid(86_400_000_000)
+    }
+
+    /// The `event_id` of the heartbeat this writer would write for `now`, or
+    /// `None` if it already knows today's is written.
+    ///
+    /// Exposed so the caller can put that id through the durable dedupe check
+    /// *before* `heartbeat` allocates a seq for it. A restarted process has no
+    /// memory of today's heartbeat, and the id is deterministic per
+    /// `(chain, day)` precisely so the check can catch it.
+    #[must_use]
+    pub fn pending_heartbeat(&self, now: Timestamp) -> Option<Uuid> {
+        let day = Self::day_of(now);
+        if self.last_heartbeat_day == Some(day) {
+            return None;
+        }
+        Some(heartbeat_id(&self.chain, day))
     }
 
     /// One per chain per day, traffic or no traffic (mvp-plan §8.4).
@@ -155,10 +215,13 @@ impl ChainWriter {
     ///
     /// Returns `None` if today's heartbeat is already written.
     pub fn heartbeat(&mut self, now: Timestamp) -> Option<Result<AuditEvent, IngestError>> {
-        let day = now.as_micros().div_euclid(86_400_000_000);
+        let day = Self::day_of(now);
         if self.last_heartbeat_day == Some(day) {
             return None;
         }
+        // Marked before the append, so a heartbeat refused as a duplicate —
+        // the store already holds today's, written before a restart — is not
+        // retried on every tick for the rest of the day.
         self.last_heartbeat_day = Some(day);
 
         let emitted = EmittedEvent {
@@ -372,6 +435,96 @@ mod tests {
         assert!(
             w.seen.len() <= DEDUPE_WINDOW,
             "the dedupe set must not grow without bound"
+        );
+    }
+
+    /// The flag that decides whether the durable check can be skipped. Wrong in
+    /// the cheap direction it costs a query; wrong in the other it silently
+    /// stops checking, which is the bug the check exists to prevent — so both
+    /// directions are asserted.
+    #[test]
+    fn a_fresh_chain_knows_its_window_is_a_complete_record() {
+        let w = writer();
+        assert!(w.window_is_complete());
+        assert!(ChainWriter::resume_from(chain_id(), "ing-1", 0, GENESIS).window_is_complete());
+    }
+
+    #[test]
+    fn resuming_a_chain_that_already_has_rows_does_not() {
+        let w = ChainWriter::resume_from(chain_id(), "ing-1", 100, GENESIS);
+        assert!(
+            !w.window_is_complete(),
+            "the store holds 100 events this writer has never seen",
+        );
+    }
+
+    #[test]
+    fn the_window_stops_claiming_completeness_at_the_first_eviction() {
+        let mut w = writer();
+        for i in 1..=(DEDUPE_WINDOW as u64) {
+            w.append(emitted(i)).unwrap();
+        }
+        assert!(w.window_is_complete(), "nothing has been evicted yet");
+
+        w.append(emitted(DEDUPE_WINDOW as u64 + 1)).unwrap();
+        assert!(
+            !w.window_is_complete(),
+            "one eviction is enough: the writer can no longer answer for the \
+             whole chain and has to ask the store",
+        );
+    }
+
+    #[test]
+    fn an_absorbed_store_hit_is_refused_like_one_this_writer_wrote() {
+        let mut w = ChainWriter::resume_from(chain_id(), "ing-1", 40, GENESIS);
+        let e = emitted(7);
+        assert!(!w.has_seen(e.event_id));
+
+        w.remember_stored(e.event_id, 7);
+
+        assert!(w.has_seen(e.event_id));
+        assert_eq!(
+            w.append(e.clone()).unwrap_err(),
+            IngestError::Duplicate(e.event_id, 7)
+        );
+        assert_eq!(w.next_seq(), 41, "a duplicate must not consume a seq");
+    }
+
+    #[test]
+    fn pending_heartbeat_names_the_id_the_next_heartbeat_would_use() {
+        let mut w = writer();
+        let day = Timestamp::from_micros(1_754_400_000_000_000);
+
+        let pending = w.pending_heartbeat(day).expect("none written yet");
+        let written = w.heartbeat(day).unwrap().unwrap();
+        assert_eq!(
+            pending, written.emitted.event_id,
+            "the id checked against the store must be the id that gets written",
+        );
+
+        assert!(w.pending_heartbeat(day).is_none());
+        let next = Timestamp::from_micros(day.as_micros() + 86_400_000_000);
+        assert!(w.pending_heartbeat(next).is_some());
+    }
+
+    /// The restart case, at the level of the writer: a heartbeat the store
+    /// already holds must be refused rather than appended at a new seq, and the
+    /// day must stay marked so the next tick does not try again.
+    #[test]
+    fn a_heartbeat_already_in_the_store_is_refused_and_not_retried() {
+        let mut w = ChainWriter::resume_from(chain_id(), "ing-2", 6, GENESIS);
+        let day = Timestamp::from_micros(1_754_400_000_000_000);
+
+        w.remember_stored(w.pending_heartbeat(day).unwrap(), 6);
+
+        assert!(matches!(
+            w.heartbeat(day),
+            Some(Err(IngestError::Duplicate(..)))
+        ));
+        assert_eq!(w.next_seq(), 7, "no seq may be consumed");
+        assert!(
+            w.pending_heartbeat(day).is_none(),
+            "the day is marked, so an hourly tick does not re-ask all day",
         );
     }
 }

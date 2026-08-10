@@ -68,19 +68,28 @@ impl<S: EventStore> Ingester<S> {
         // Where each writer stood before this batch, so a failure can undo it.
         let mut rollback: HashMap<ChainId, (u64, ancre_canon::Hash32)> = HashMap::new();
 
-        for emitted in batch {
-            let chain = ChainId {
-                tenant_id: emitted.tenant_id.to_string(),
-                system_id: emitted.system_id.to_string(),
-            };
+        // Everything that needs the store happens first, before a single event
+        // is chained. Both of the calls below can fail, and a half-chained
+        // batch that then defers is exactly the state the rollback exists to
+        // avoid — so it is cheaper to never enter it.
+        let mut ids_by_chain: HashMap<ChainId, Vec<uuid::Uuid>> = HashMap::new();
+        for emitted in &batch {
+            ids_by_chain
+                .entry(ChainId {
+                    tenant_id: emitted.tenant_id.to_string(),
+                    system_id: emitted.system_id.to_string(),
+                })
+                .or_default()
+                .push(emitted.event_id);
+        }
 
-            if !self.writers.contains_key(&chain) {
+        for (chain, ids) in &ids_by_chain {
+            if !self.writers.contains_key(chain) {
                 // Resuming needs the store. If it is down, the batch cannot be
                 // chained *at all* — guessing a starting seq would fork the
                 // chain the moment the store came back. Defer and let the bus
                 // redeliver, exactly as a failed insert does.
-                let Ok(resumed) = self.store.head(&chain).await else {
-                    self.rewind(rollback);
+                let Ok(resumed) = self.store.head(chain).await else {
                     report.deferred += 1;
                     return Ok(report);
                 };
@@ -93,10 +102,26 @@ impl<S: EventStore> Ingester<S> {
                 self.writers.insert(chain.clone(), writer);
             }
 
+            // The durable dedupe check. Same failure handling as `head`: a
+            // store that cannot answer "have I seen these" must not be
+            // answered with "probably not", because the cost of guessing wrong
+            // is a double-chained event that no later check can undo.
+            if self.absorb_stored(chain, ids).await.is_err() {
+                report.deferred += 1;
+                return Ok(report);
+            }
+        }
+
+        for emitted in batch {
+            let chain = ChainId {
+                tenant_id: emitted.tenant_id.to_string(),
+                system_id: emitted.system_id.to_string(),
+            };
+
             let writer = self
                 .writers
                 .get_mut(&chain)
-                .expect("just inserted if missing");
+                .expect("a writer was built for every chain in the batch");
 
             rollback
                 .entry(chain.clone())
@@ -124,6 +149,75 @@ impl<S: EventStore> Ingester<S> {
             report.deferred += 1;
         }
         Ok(report)
+    }
+
+    /// Fold the store's answer to "do you already hold these?" into the
+    /// writer's dedupe memory, so `append` refuses them exactly as it refuses
+    /// an id this process wrote itself.
+    ///
+    /// Skipped entirely while the writer's window is still a complete record
+    /// of its chain — a fresh chain under a window that has never evicted,
+    /// which is every chain in a new deployment. That is what keeps this from
+    /// being a round trip per batch forever.
+    async fn absorb_stored(
+        &mut self,
+        chain: &ChainId,
+        ids: &[uuid::Uuid],
+    ) -> Result<(), IngestError> {
+        let unknown: Vec<uuid::Uuid> = {
+            let writer = self
+                .writers
+                .get(chain)
+                .expect("a writer was built for every chain in the batch");
+            if writer.window_is_complete() {
+                return Ok(());
+            }
+            ids.iter()
+                .copied()
+                .filter(|id| !writer.has_seen(*id))
+                .collect()
+        };
+
+        if unknown.is_empty() {
+            return Ok(());
+        }
+
+        let hits = self.store.stored(chain, &unknown).await?;
+        if let Some(writer) = self.writers.get_mut(chain) {
+            for (id, seq) in hits {
+                writer.remember_stored(id, seq);
+            }
+        }
+        Ok(())
+    }
+
+    /// Rebuild a writer for every chain the store already holds.
+    ///
+    /// Call once at startup. Without it, `heartbeats` only covers chains this
+    /// process has already seen traffic for — so a system that goes quiet
+    /// across a restart stops emitting the daily heartbeat that makes its
+    /// silence countable, and "no traffic" becomes indistinguishable from "no
+    /// such system" all over again (mvp-plan §8.4). The heartbeat exists to
+    /// prevent exactly that, so a heartbeat that only covers busy chains is
+    /// the one shape it must not have.
+    ///
+    /// Returns the number of chains seeded. Failure is the caller's to decide
+    /// on: an ingester that cannot reach the store at startup can still serve
+    /// traffic once it comes back, and traffic builds its own writers.
+    pub async fn seed_from_store(&mut self) -> Result<usize, IngestError> {
+        let chains = self.store.chains().await?;
+        let mut seeded = 0;
+        for (chain, last_seq, head) in chains {
+            if self.writers.contains_key(&chain) {
+                continue;
+            }
+            self.writers.insert(
+                chain.clone(),
+                ChainWriter::resume_from(chain, &self.node_id, last_seq, head),
+            );
+            seeded += 1;
+        }
+        Ok(seeded)
     }
 
     /// Put every touched chain back where it was before the batch.
@@ -159,7 +253,23 @@ impl<S: EventStore> Ingester<S> {
     }
 
     /// Daily heartbeats for every chain this ingester knows about.
+    ///
+    /// After `seed_from_store` that is every chain in the store, including the
+    /// ones with no traffic — which is the whole point. It also means a
+    /// restart mid-day meets chains whose heartbeat is already written and
+    /// whose writers have no memory of it, so today's ids go through the
+    /// durable check first. Skipping that would append a second heartbeat at a
+    /// new seq every time the process restarted.
     pub async fn heartbeats(&mut self, now: Timestamp) -> Result<u64, IngestError> {
+        let pending: Vec<(ChainId, uuid::Uuid)> = self
+            .writers
+            .values()
+            .filter_map(|w| w.pending_heartbeat(now).map(|id| (w.chain.clone(), id)))
+            .collect();
+        for (chain, id) in pending {
+            self.absorb_stored(&chain, &[id]).await?;
+        }
+
         let mut written = Vec::new();
         for writer in self.writers.values_mut() {
             if let Some(Ok(event)) = writer.heartbeat(now) {

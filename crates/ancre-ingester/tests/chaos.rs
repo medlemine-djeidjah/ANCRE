@@ -29,6 +29,8 @@ struct FlakyStore {
     down: AtomicBool,
     inserts_attempted: AtomicU64,
     contacts: AtomicU64,
+    /// Durable dedupe lookups, so a test can assert the fast path skips them.
+    lookups: AtomicU64,
 }
 
 impl FlakyStore {
@@ -75,6 +77,46 @@ impl EventStore for &FlakyStore {
             return Err(IngestError::Store("connection refused".into()));
         }
         Ok(self.chain_rows(chain).last().map(|r| (r.seq, r.event_hash)))
+    }
+
+    async fn stored(
+        &self,
+        chain: &ChainId,
+        ids: &[uuid::Uuid],
+    ) -> Result<Vec<(uuid::Uuid, u64)>, IngestError> {
+        self.contacts.fetch_add(1, Ordering::SeqCst);
+        self.lookups.fetch_add(1, Ordering::SeqCst);
+        if self.down.load(Ordering::SeqCst) {
+            return Err(IngestError::Store("connection refused".into()));
+        }
+        Ok(self
+            .chain_rows(chain)
+            .into_iter()
+            .filter(|r| ids.contains(&r.emitted.event_id))
+            .map(|r| (r.emitted.event_id, r.seq))
+            .collect())
+    }
+
+    async fn chains(&self) -> Result<Vec<(ChainId, u64, Hash32)>, IngestError> {
+        self.contacts.fetch_add(1, Ordering::SeqCst);
+        if self.down.load(Ordering::SeqCst) {
+            return Err(IngestError::Store("connection refused".into()));
+        }
+        let mut heads: HashMap<ChainId, (u64, Hash32)> = HashMap::new();
+        for r in self.rows() {
+            let chain = ChainId {
+                tenant_id: r.emitted.tenant_id.to_string(),
+                system_id: r.emitted.system_id.to_string(),
+            };
+            let head = heads.entry(chain).or_insert((0, GENESIS));
+            if r.seq >= head.0 {
+                *head = (r.seq, r.event_hash);
+            }
+        }
+        Ok(heads
+            .into_iter()
+            .map(|(chain, (seq, hash))| (chain, seq, hash))
+            .collect())
     }
 }
 
@@ -326,6 +368,188 @@ async fn daily_heartbeats_keep_a_silent_chain_countable() {
     let rows = store.chain_rows(&chain_id("hr-screening"));
     assert_eq!(rows.len(), 12, "5 requests + 7 daily heartbeats");
     assert!(verify_range(rows, GENESIS).is_clean());
+}
+
+/// D10, and the shape of the bug matters more than the count.
+///
+/// A restart empties the in-memory dedupe window while the bus still holds
+/// unacked messages, so *every* redelivery after a restart is one the window
+/// cannot recognise. Chained a second time, they get fresh seqs, and the chain
+/// verifies perfectly — it just claims twice the traffic. The checkpointer
+/// then compares the leaf count against the range and refuses to sign it, so
+/// the chain stops being attested and no later repair brings it back.
+#[tokio::test]
+async fn a_redelivery_the_window_cannot_remember_is_caught_by_the_store() {
+    let store = FlakyStore::default();
+    let chain = chain_id("hr-screening");
+    let sent = traffic("hr-screening", 300);
+
+    let mut first = Ingester::new(&store, "ing-1");
+    let r = first.ingest(sent.clone()).await.unwrap();
+    assert_eq!(r.inserted, 300);
+    assert_eq!(
+        store.lookups.load(Ordering::SeqCst),
+        0,
+        "a chain that started empty under an untrimmed window knows the answer \
+         already and must not pay a round trip to be told it",
+    );
+
+    // The process dies and comes back. The window is gone; the store is not.
+    drop(first);
+    let mut restarted = Ingester::new(&store, "ing-2");
+
+    let r = restarted.ingest(sent.clone()).await.unwrap();
+    assert_eq!(r.duplicates, 300, "every redelivery must be recognised");
+    assert_eq!(r.chained, 0);
+    assert_eq!(r.inserted, 0);
+    assert!(
+        store.lookups.load(Ordering::SeqCst) > 0,
+        "the answer can only have come from the store",
+    );
+
+    let rows = store.chain_rows(&chain);
+    assert_eq!(rows.len(), 300, "the record must not describe 600 requests");
+    assert_eq!(rows.last().unwrap().seq, 300);
+    assert!(verify_range(rows, GENESIS).is_clean());
+}
+
+/// The same restart, then genuinely new traffic. Recognising redeliveries is
+/// worth nothing if it also refuses the events that follow them.
+#[tokio::test]
+async fn a_restart_continues_the_chain_after_absorbing_its_redeliveries() {
+    let store = FlakyStore::default();
+    let chain = chain_id("hr-screening");
+
+    let mut first = Ingester::new(&store, "ing-1");
+    first.ingest(traffic("hr-screening", 100)).await.unwrap();
+    drop(first);
+
+    let mut restarted = Ingester::new(&store, "ing-2");
+    // A redelivered batch with new events mixed in, which is what a partially
+    // acked JetStream batch actually looks like.
+    // `traffic` is deterministic in the event id, so the first 100 of a 150-run
+    // are byte for byte the batch that was already stored.
+    let mixed = traffic("hr-screening", 150);
+    let r = restarted.ingest(mixed).await.unwrap();
+
+    assert_eq!(r.duplicates, 100);
+    assert_eq!(r.inserted, 50);
+
+    let rows = store.chain_rows(&chain);
+    assert_eq!(rows.len(), 150);
+    assert_eq!(rows.last().unwrap().seq, 150);
+    assert!(verify_range(rows, GENESIS).is_clean());
+}
+
+/// A store that cannot answer "have you seen these" must not be answered with
+/// "probably not". Guessing costs a double-chained event that nothing can
+/// undo; deferring costs a redelivery.
+#[tokio::test]
+async fn a_store_that_cannot_answer_the_dedupe_check_defers_the_batch() {
+    let store = FlakyStore::default();
+    let mut first = Ingester::new(&store, "ing-1");
+    first.ingest(traffic("hr-screening", 50)).await.unwrap();
+    drop(first);
+
+    let mut restarted = Ingester::new(&store, "ing-2");
+    restarted.seed_from_store().await.unwrap();
+
+    store.kill();
+    let r = restarted.ingest(traffic("hr-screening", 50)).await.unwrap();
+
+    assert_eq!(r.deferred, 1);
+    assert_eq!(r.chained, 0, "nothing may be chained on a guess");
+    assert_eq!(store.chain_rows(&chain_id("hr-screening")).len(), 50);
+
+    // And the deferral leaves nothing behind: the redelivery after the store
+    // returns is still recognised as one.
+    store.revive();
+    let r = restarted.ingest(traffic("hr-screening", 50)).await.unwrap();
+    assert_eq!(r.duplicates, 50);
+    assert_eq!(r.inserted, 0);
+}
+
+/// D15. The heartbeat exists so that a silent system and a decommissioned one
+/// are different shapes in the record. Before seeding, a restart forgot every
+/// chain that was not currently sending traffic — so the systems whose silence
+/// the heartbeat was built to make countable were exactly the ones it stopped
+/// covering.
+#[tokio::test]
+async fn a_restart_keeps_heartbeating_the_chains_that_have_gone_quiet() {
+    let store = FlakyStore::default();
+
+    let mut first = Ingester::new(&store, "ing-1");
+    for system in ["hr-screening", "credit-scoring"] {
+        first.ingest(traffic(system, 10)).await.unwrap();
+    }
+    drop(first);
+
+    // A new process. Neither chain sends anything ever again.
+    let mut restarted = Ingester::new(&store, "ing-2");
+    assert_eq!(restarted.chain_count(), 0, "a fresh process knows nothing");
+
+    let seeded = restarted.seed_from_store().await.unwrap();
+    assert_eq!(seeded, 2);
+    assert_eq!(restarted.chain_count(), 2);
+
+    let mut day = 1_754_400_000_000_000i64 + 86_400_000_000;
+    for _ in 0..5 {
+        let written = restarted
+            .heartbeats(ancre_types::Timestamp::from_micros(day))
+            .await
+            .unwrap();
+        assert_eq!(written, 2, "both silent chains must stay countable");
+        day += 86_400_000_000;
+    }
+
+    for system in ["hr-screening", "credit-scoring"] {
+        let rows = store.chain_rows(&chain_id(system));
+        assert_eq!(rows.len(), 15, "{system}: 10 requests + 5 daily heartbeats");
+        assert!(verify_range(rows, GENESIS).is_clean(), "{system}");
+    }
+}
+
+/// Seeding and deduplication have to hold together: a process that restarts
+/// after today's heartbeat is written comes back with a writer that has no
+/// memory of it, and the id is deterministic per `(chain, day)` for exactly
+/// this reason. Without the durable check, every restart would add another
+/// heartbeat for the same day at a new seq.
+#[tokio::test]
+async fn a_restart_mid_day_does_not_write_a_second_heartbeat() {
+    let store = FlakyStore::default();
+    let day = ancre_types::Timestamp::from_micros(1_754_400_000_000_000);
+
+    let mut first = Ingester::new(&store, "ing-1");
+    first.ingest(traffic("hr-screening", 5)).await.unwrap();
+    assert_eq!(first.heartbeats(day).await.unwrap(), 1);
+    drop(first);
+
+    // Three restarts inside the same day.
+    for _ in 0..3 {
+        let mut restarted = Ingester::new(&store, "ing-2");
+        restarted.seed_from_store().await.unwrap();
+        assert_eq!(
+            restarted
+                .heartbeats(ancre_types::Timestamp::from_micros(
+                    day.as_micros() + 3_600_000_000
+                ))
+                .await
+                .unwrap(),
+            0,
+            "today's heartbeat is already in the store",
+        );
+    }
+
+    let rows = store.chain_rows(&chain_id("hr-screening"));
+    assert_eq!(rows.len(), 6, "5 requests + exactly one heartbeat");
+    assert_eq!(rows.last().unwrap().seq, 6);
+    assert!(verify_range(rows, GENESIS).is_clean());
+
+    // The next day still gets one.
+    let mut restarted = Ingester::new(&store, "ing-2");
+    restarted.seed_from_store().await.unwrap();
+    let next = ancre_types::Timestamp::from_micros(day.as_micros() + 86_400_000_000);
+    assert_eq!(restarted.heartbeats(next).await.unwrap(), 1);
 }
 
 /// Signing the range an outage was survived through is what makes the recovery

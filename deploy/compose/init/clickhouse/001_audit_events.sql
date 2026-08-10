@@ -73,7 +73,18 @@ CREATE TABLE IF NOT EXISTS ancre.audit_events (
   ttft_ms           UInt32,
   tokens_in         UInt32,
   tokens_out        UInt32,
-  error_code        LowCardinality(String)
+  error_code        LowCardinality(String),
+
+  -- Makes the ingester's durable dedupe lookup cheap. `event_id` is not in the
+  -- sorting key and never can be — the sorting key is what makes a chain read
+  -- back in seq order — so without a skip index, "do you already hold these
+  -- ids" reads every granule of the chain's partition.
+  --
+  -- This is not a schema change in the sense that matters. The freeze is about
+  -- hashed *columns*: adding one changes the canonical encoding and every
+  -- chain written before it verifies under a different rule set. A skip index
+  -- adds no column, changes no row, and leaves canon_version alone.
+  INDEX idx_event_id event_id TYPE bloom_filter(0.01) GRANULARITY 1
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(occurred_at)
