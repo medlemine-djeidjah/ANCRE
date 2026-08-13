@@ -11,7 +11,7 @@ Two categories, and the distinction matters:
 
 Update this file in the same commit that creates or clears an entry.
 
-Last updated: M6, the dashboard.
+Last updated: the first CI run.
 
 The seam has moved again, and this time it moved off the critical path. Every
 milestone's done-when has been met: `docker compose up` brings up a seeded,
@@ -22,10 +22,28 @@ chain and the signature over it refuse it.
 
 What is left is listed below, and none of it blocks an install. The entry that
 most deserves reading before a production deployment is D10, dedupe as a
-bounded in-memory window. The
-largest single item is that **CI has still never run** (D5) — there is no
-remote — so every claim in this repository is a claim about a 20-core dev
-machine.
+bounded in-memory window.
+
+**D5 is cleared: CI has run.** The repository has a remote, the pipeline has
+executed, and all seven jobs are green — so the claims here are no longer
+claims about one 20-core dev machine. The first run is worth recording,
+because it failed in none of the ways D5 predicted. `latency-gate` and
+`quickstart` were the two jobs the entry expected to be fragile on a shared
+runner; both passed, `quickstart` in 280s against a 45-minute budget, and the
+resolver's headroom turned out to be wide enough (p99 171ns against a 5µs
+target) that four cores absorb what twenty did. What failed instead was
+everything no machine but this one had ever executed.
+
+The finding worth carrying is not any of the nine lints that a six-month-old
+local toolchain had never shown us. It is that **`rust-version = "1.85"` was
+suppressing a security patch, silently.** Cargo's resolver is MSRV-aware, so
+it held `time` at 0.3.45 — RUSTSEC-2026-0009, a stack-exhaustion DoS — and
+declining to upgrade is not an error, so nothing said a word. A conservative
+MSRV read as caution while pinning known-vulnerable code. Alongside it,
+async-nats 0.38 was holding rustls-webpki at 0.102.8 and dragging four
+certificate-validation advisories plus an unmaintained rustls-pemfile through
+the graph of a product whose entire proposition is trust. Six advisories, and
+the only thing standing between us and knowing was a `git remote`.
 
 Writing `docs/deploy.md` and `docs/integrate.md` found two defects that every
 test in the workspace had missed, both hidden by the same fake. Documentation
@@ -50,6 +68,23 @@ Things that affect what an auditor can be shown.
 | E11 | **Two event types overload a metrics column.** `config.generation.applied` carries `propagation_ms` in `latency_ms` and the change class in `error_code`; `telemetry.dropped` carries the number of lost events in `tokens_out`. Each is documented at the call site and none is wrong, but a reader of the raw table needs the event type to interpret them. The alternative was new columns, which the frozen encoding forbids | `ancre-gateway/src/config_feed.rs`, `ancre-gateway/src/telemetry.rs` | by design |
 | E8 | **`error_code` is only the HTTP status.** Provider error bodies are not parsed for a code, deliberately: guessing at a provider-specific shape would put a fabricated string in the evidence | `ancre-gateway/src/tap.rs` | by design |
 | E13 | **A pack's manifest is unsigned, and so is the `prev_hash` it may declare.** The verifier says so on both counts and neither is load-bearing — the checkpoints are what bind the pack, and an attacker who re-anchors a forged prefix still cannot produce a signature over it. It does mean a partial export's anchor should be confirmed out of band, which `--from` exists for | `ancre-verify/src/pack.rs` | by design |
+
+## Cleared by the first CI run
+
+- ~~D5 CI has never run~~ — it has, on `github.com/medlemine-djeidjah/ANCRE`,
+  and all seven jobs are green. The entry warned that "the first push is a
+  surprise; expect to tune thresholds or mark the gate advisory". No threshold
+  needed tuning and no gate was marked advisory. Three jobs failed and every
+  one of them failed for a reason unrelated to hardware: a local toolchain four
+  releases behind CI's `stable`, a `cargo bench --save-baseline` invocation that
+  could never have succeeded because the lib target does not set
+  `harness = false`, and six dependency advisories. `workflow_dispatch` was
+  added in the same pass, because the triggers were `push: [master]` and
+  `pull_request` — so a milestone branch could not reach its own gate without
+  first opening the PR that the gate exists to inform
+- ~~D7 no cargo-deny run locally~~ — replaced rather than deleted. It runs, and
+  the new form of the entry is about freshness, not absence: an advisory
+  database is fetched per run, so green means green *today*
 
 ## Cleared in M6
 
@@ -166,7 +201,7 @@ Shortcuts. Each one is cheap now and expensive later.
 
 | # | Item | Where | Cost if ignored |
 |---|---|---|---|
-| D5 | **CI has never run.** No git remote, no GitHub repo. Every command in the workflow passes locally, including the `transports` job run container-for-container as written — but the `latency-gate` job on a shared runner will be noisier than a 20-core dev box, and no job builds the container images at all, so the Dockerfile is verified only by the fact that a human ran the quickstart | `.github/workflows/ci.yml` | The first push is a surprise; expect to tune thresholds or mark the gate advisory |
+| D19 | **The image is built by a different rustc than the one CI lints with.** `deploy/compose/Dockerfile` pins `rust:1.93`, `dtolnay/rust-toolchain@stable` resolved to 1.97.1. 1.93 clears the 1.88 floor so this is an inconsistency and not a defect, but it is why `quickstart` stayed green through the run where `check` went red: the job that builds the binaries never runs clippy, and the job that runs clippy never builds the image | `deploy/compose/Dockerfile`, `.github/workflows/ci.yml` | A lint or a rustc change lands in the shipped binary before any job notices |
 | D18 | **A stale-artefact class of build bug is fixed by `touch`, not by design.** `COPY` preserves mtimes and cargo decides freshness by mtime, so a persistent `/build/target` cache mount can serve artefacts compiled from an earlier version of a file that was edited before the previous build. It happened during M5 and produced a compile error several crates away from the cause. The workaround touches every workspace source before building — correct, and it recompiles nine crates every image build | `deploy/compose/Dockerfile` | A future change to the caching strategy reintroduces images whose binaries do not match their source |
 | D1 | **`verify_range` holds every leaf hash resident** to compute the range root — 32 bytes per event, so ~320MB for a 10M-event range. `ChainSource::leaves` has the same shape on the writing side, and `--pack` now adds a third: it reads the whole `events.jsonl` into memory before verifying, where `--chain` streams | `ancre-chain/src/verify.rs`, `ancre-control/src/clickhouse.rs`, `ancre-verify/src/pack.rs` | An auditor's laptop OOMs on a large pack; a catch-up tick OOMs the control plane |
 | D2 | **`PromptRef::Inline` is never constructed.** `ConfigSnapshot::build` always produces `Lazy`, and the gateway never fetches a body, so no prompt body is ever resident on the hot path. Pins are unaffected — they only need the hash. The control plane now *stores* bodies and serves them from `GET /v1/prompts/{hash}`, verified against their own key, so the missing half is the fetch and the resolver's LRU | `ancre-types`, `ancre-resolver` | Prompt bodies cannot be shown next to the events that used them |
@@ -178,7 +213,7 @@ Shortcuts. Each one is cheap now and expensive later.
 | D16 | **The gateway trusts the first snapshot it is handed.** Cold start retries for 60s and then exits, which is right, but there is no lower bound on what it will accept — an empty registry publishes an empty snapshot, and the gateway installs it and serves 503s for every key. The compose stack now closes the *timing* half of this by making Postgres unhealthy until the registry has at least one key, so the control plane cannot publish an empty snapshot during init; the gateway itself still has no floor | `ancre-gateway/src/main.rs` | A registry pointed at the wrong database looks like a working gateway with no customers |
 | D14 | **Generation allocation is serialised; publication is not.** `allocate_generation` holds an advisory lock, so two control-plane replicas never mint the same number. The bus send happens after the lock is released, so replica A can allocate 42, replica B allocate 43 and publish first, and A's 42 lands after it. `PinResolver::reload` installs whatever it is given, so a gateway would go backwards a generation until the next publish. One replica is the MVP deployment and the fix is a monotonicity check in `reload`, which is cheap — it is listed rather than done because the check needs a decision about what a gateway should do when it *legitimately* sees a lower generation after a control-plane rollback | `ancre-control/src/postgres.rs`, `ancre-resolver/src/lib.rs` | Two replicas can flip a fleet between two configurations |
 | D12 | **The control plane's poll backstop refuses to serve unpublished edits.** `current()` errors if the registry has changed since the last publish, rather than publishing on demand. Now that `main` runs a 10s publish loop the window is ten seconds rather than forever, so this has gone from a support call to a confusing 503 during a deploy — still worth a better error than the one it has | `ancre-control/src/snapshot.rs` | A 503 from `GET /v1/snapshot` that reads as an outage and is actually a race with the publish loop |
-| D7 | **No `cargo-deny` run locally.** It gates in CI, which has never run | — | A licence or advisory problem surfaces later than it should |
+| D7 | **A dependency advisory is only ever as fresh as the last run.** `cargo-deny` now runs on every push and is green, but the advisory database is fetched at run time, so a clean run is a statement about the day it ran and nothing more. Nothing yet runs it on a schedule, which means a CVE published against a pinned crate is invisible until somebody happens to push | `deny.toml`, `.github/workflows/ci.yml` | An advisory sits undetected through a quiet week |
 | D20 | **The chaos pass is not in CI.** `chaos.sh` takes minutes of wall clock, most of it waiting out a staleness budget, and it is the only check in this repository that a human has to remember to run. It caught a bug that would have made the product unusable in production, which is precisely the argument for automating it | `deploy/compose/chaos.sh` | The next regression of the same class is found by a customer |
 | D10 | **Dedupe is a bounded in-memory window** of 100 000 `event_id`s. The durable check has to be a unique index on `event_id` in ClickHouse, and that DDL is not written | `ancre-ingester/src/chain_writer.rs` | A redelivery older than the window doubles an event, the chain still verifies, and the checkpointer then refuses the range for good — `tick` compares the leaf count against the range and will not sign a root over a set it cannot account for, so that chain stops being attested |
 | D11 | **One `ChainWriter` per chain, unbounded.** An ingester serving ten thousand systems holds ten thousand writers, each with a dedupe window. No eviction. The gateway's drop counter has the same shape and *is* bounded — 4 096 chains, then an `unknown/unknown` overflow bucket — which is the pattern to copy here | `ancre-ingester/src/pipeline.rs` | Memory grows with tenant count rather than with traffic |
