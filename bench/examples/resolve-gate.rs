@@ -86,8 +86,8 @@ fn bench_resolve() -> bool {
 
     let p = Percentiles::from_samples(&mut samples);
     println!("  {p}");
-    let a = check("resolve p50", p.p50, Duration::from_nanos(2_000));
-    let b = check("resolve p99", p.p99, Duration::from_nanos(5_000));
+    let a = check("resolve p50", p.p50, Duration::from_micros(2));
+    let b = check("resolve p99", p.p99, Duration::from_micros(5));
     println!();
     a && b
 }
@@ -129,7 +129,7 @@ fn bench_resolve_under_reload_storm() -> bool {
     let ok = check(
         "resolve p99 under reload storm",
         p.p99,
-        Duration::from_nanos(8_000),
+        Duration::from_micros(8),
     );
     println!();
     ok
@@ -199,7 +199,7 @@ fn bench_resolve_saturated() -> bool {
     let ok = check(
         "resolve p99, all cores + reload storm",
         p.p99,
-        Duration::from_nanos(8_000),
+        Duration::from_micros(8),
     );
     println!();
     ok
@@ -234,11 +234,7 @@ fn bench_snapshot_build() -> bool {
     }
     let p = Percentiles::from_samples(&mut samples);
     println!("  {p}");
-    let ok2 = check(
-        "resolve p99, 10k systems",
-        p.p99,
-        Duration::from_nanos(5_000),
-    );
+    let ok2 = check("resolve p99, 10k systems", p.p99, Duration::from_micros(5));
     println!();
     ok && ok2
 }

@@ -215,7 +215,7 @@ impl SnapshotSpec {
     /// order is semantic, not incidental.
     pub fn canonicalize_order(&mut self) {
         self.systems.sort_by(|a, b| a.system_id.cmp(&b.system_id));
-        self.keys.sort_by(|a, b| a.key_hash.cmp(&b.key_hash));
+        self.keys.sort_by_key(|a| a.key_hash);
     }
 }
 

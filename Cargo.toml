@@ -16,20 +16,34 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+# 1.88 and not 1.85 because of security fixes, not features. Cargo's resolver
+# is MSRV-aware: while this said 1.85 it silently held `time` at 0.3.45, which
+# carries RUSTSEC-2026-0009, and refused the upgrade rather than report it.
+# `time` 0.3.55 and async-nats 0.50 both require 1.88 and are the only crates
+# in the graph that need more than 1.85. Lowering this again reintroduces a
+# stack-exhaustion DoS and four cert-validation advisories.
+rust-version = "1.88"
 license = "Apache-2.0"
 repository = "https://github.com/medlemine-djeidjah/ANCRE"
 
 [workspace.dependencies]
 # internal
-ancre-canon = { path = "crates/ancre-canon" }
-ancre-types = { path = "crates/ancre-types" }
-ancre-chain = { path = "crates/ancre-chain" }
-ancre-resolver = { path = "crates/ancre-resolver" }
-ancre-provider = { path = "crates/ancre-provider" }
-ancre-gateway = { path = "crates/ancre-gateway" }
-ancre-ingester = { path = "crates/ancre-ingester" }
-ancre-control = { path = "crates/ancre-control" }
+# `version` alongside `path` on every one of these. A path dependency with no
+# version resolves to `*`, and deny.toml denies wildcards — which is a supply
+# chain rule aimed at registry dependencies floating to whatever the index
+# serves that day. cargo-deny's exemption for path dependencies applies only to
+# crates marked `publish = false`, and these are not, so without an explicit
+# version the rule fires thirty-odd times on this workspace's own internals and
+# buries anything real. Publishing any of these would require the version here
+# regardless: crates.io rejects a bare path dependency.
+ancre-canon = { path = "crates/ancre-canon", version = "0.1.0" }
+ancre-types = { path = "crates/ancre-types", version = "0.1.0" }
+ancre-chain = { path = "crates/ancre-chain", version = "0.1.0" }
+ancre-resolver = { path = "crates/ancre-resolver", version = "0.1.0" }
+ancre-provider = { path = "crates/ancre-provider", version = "0.1.0" }
+ancre-gateway = { path = "crates/ancre-gateway", version = "0.1.0" }
+ancre-ingester = { path = "crates/ancre-ingester", version = "0.1.0" }
+ancre-control = { path = "crates/ancre-control", version = "0.1.0" }
 
 # trust root — these two are the only deps ancre-canon is allowed
 ciborium = "0.2"
@@ -74,7 +88,7 @@ rand = "0.8"
 # infra
 sqlx = { version = "0.8", features = ["runtime-tokio", "tls-rustls", "postgres", "uuid", "time", "json", "macros"] }
 clickhouse = { version = "0.13", features = ["time", "uuid"] }
-async-nats = "0.38"
+async-nats = "0.50"
 rust-embed = "8"
 mime_guess = "2"
 

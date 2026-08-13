@@ -120,10 +120,10 @@ impl<B> TappedBody<B> {
         // The provider's answer overrides the route's declared version. The
         // route says what we asked for; only the response says what ran.
         pins.model_version = served.model_version;
-        if let Some(flag) = served.flag {
-            if !pins.risk_flags.contains(&flag) {
-                pins.risk_flags.push(flag);
-            }
+        if let Some(flag) = served.flag
+            && !pins.risk_flags.contains(&flag)
+        {
+            pins.risk_flags.push(flag);
         }
 
         let now = Instant::now();

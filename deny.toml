@@ -19,6 +19,12 @@ allow = [
     "Unicode-3.0",
     "Zlib",
     "CC0-1.0",
+    # webpki-roots, which is not code but Mozilla's CA root store transcribed
+    # into Rust. CDLA-Permissive-2.0 is a data licence with no copyleft and no
+    # attribution requirement on downstream binaries, which is why a permissive
+    # list that omits it still rejects the trust anchors every TLS client here
+    # depends on.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.9
 

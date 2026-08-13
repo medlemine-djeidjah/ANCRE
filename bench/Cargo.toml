@@ -8,6 +8,13 @@ rust-version.workspace = true
 license.workspace = true
 publish = false
 
+# The two benches below set `harness = false` because they are criterion, but
+# the lib target does not, so `cargo bench` also runs it under libtest — which
+# has no `--save-baseline` and exits non-zero the moment CI passes one. The lib
+# here is fixtures and helpers for the benches; it has nothing to measure.
+[lib]
+bench = false
+
 [dependencies]
 ancre-canon = { workspace = true }
 ancre-types = { workspace = true, features = ["fixtures"] }

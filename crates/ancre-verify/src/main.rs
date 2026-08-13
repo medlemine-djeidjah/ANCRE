@@ -362,16 +362,16 @@ fn print_pack_header<W: Write>(
     // transit, and it costs an auditor nothing to be told.
     if report.events_checked > 0 {
         let declared = (m.seq_from, m.seq_to);
-        if let (Some(from), Some(to)) = declared {
-            if from != report.seq_from || to != report.seq_to {
-                writeln!(
-                    w,
-                    "  ! the manifest declares seq {from}–{to}, and this pack \
-                     contains seq {}–{}. The manifest is not signed, so treat \
-                     the events as authoritative and ask why they differ",
-                    report.seq_from, report.seq_to
-                )?;
-            }
+        if let (Some(from), Some(to)) = declared
+            && (from != report.seq_from || to != report.seq_to)
+        {
+            writeln!(
+                w,
+                "  ! the manifest declares seq {from}–{to}, and this pack \
+                 contains seq {}–{}. The manifest is not signed, so treat \
+                 the events as authoritative and ask why they differ",
+                report.seq_from, report.seq_to
+            )?;
         }
     }
     writeln!(w)
@@ -489,7 +489,7 @@ fn thousands(n: u64) -> String {
     let s = n.to_string();
     let mut out = String::with_capacity(s.len() + s.len() / 3);
     for (i, c) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
             out.push(' ');
         }
         out.push(c);
