@@ -4,6 +4,11 @@ on:
   push:
     branches: [master]
   pull_request:
+  # A milestone lives on its own branch and only reaches master through a PR,
+  # so without this the only way to run the pipeline against unmerged work is
+  # to open the PR first. That is backwards for a gate whose whole purpose is
+  # to be run before anyone is asked to look.
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
